@@ -233,8 +233,56 @@ function tagColorClass(kind, value) {
   return "";
 }
 
-const IS_LOCALHOST = typeof window !== "undefined" &&
-  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+// ── Storage ──────────────────────────────────────────────────────────────────
+// Artifact Claude  → window.storage (compartilhado via link publicado)
+// Vercel / local   → Supabase (banco de dados real, persiste em qualquer device)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IS_CLAUDE_ARTIFACT = typeof window !== "undefined" &&
+  typeof window.storage !== "undefined" &&
+  typeof window.storage.get === "function";
+
+const SUPABASE_URL  = "https://rartvdhsnvrnsczuleqq.supabase.co";
+const SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJhcnR2ZGhzbnZybnNjenVsZXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxNDg5ODgsImV4cCI6MjEwMjcyNDk4OH0.BCAxD7WHwk_NbbwhFZVJ3RgVS_Zr8O7UBH3oT6aWD4E";
+const SUPABASE_TABLE = "vivo_storage";
+
+const SB_HEADERS = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+  "Prefer": "resolution=merge-duplicates",
+};
+
+async function sbGet(key, fallback) {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?key=eq.${encodeURIComponent(key)}&select=value`,
+      { headers: SB_HEADERS }
+    );
+    if (!res.ok) return fallback;
+    const rows = await res.json();
+    if (!rows || rows.length === 0) return fallback;
+    return JSON.parse(rows[0].value);
+  } catch (e) {
+    console.error("sbGet error", key, e);
+    return fallback;
+  }
+}
+
+async function sbSet(key, value) {
+  try {
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`,
+      {
+        method: "POST",
+        headers: SB_HEADERS,
+        body: JSON.stringify({ key, value: JSON.stringify(value) }),
+      }
+    );
+  } catch (e) {
+    console.error("sbSet error", key, e);
+  }
+}
 
 function withTimeout(promise, ms, fallback) {
   return new Promise((resolve) => {
@@ -248,42 +296,34 @@ function withTimeout(promise, ms, fallback) {
 }
 
 async function storageGet(key, fallback) {
-  if (IS_LOCALHOST) {
+  if (IS_CLAUDE_ARTIFACT) {
     try {
-      const val = localStorage.getItem("vivo:" + key);
-      return val ? JSON.parse(val) : fallback;
+      const res = await withTimeout(window.storage.get(key, true), 5000, null);
+      if (!res) return fallback;
+      return JSON.parse(res.value);
     } catch (e) {
       return fallback;
     }
   }
-  try {
-    const res = await withTimeout(window.storage.get(key, true), 5000, null);
-    if (!res) return fallback;
-    return JSON.parse(res.value);
-  } catch (e) {
-    return fallback;
-  }
+  return sbGet(key, fallback);
 }
 
 async function storageSet(key, value) {
-  if (IS_LOCALHOST) {
+  if (IS_CLAUDE_ARTIFACT) {
     try {
-      localStorage.setItem("vivo:" + key, JSON.stringify(value));
+      await withTimeout(window.storage.set(key, JSON.stringify(value), true), 5000, null);
     } catch (e) {
-      console.error("storageSet (localStorage) error", key, e);
+      console.error("storageSet (claude) error", key, e);
     }
     return;
   }
-  try {
-    await withTimeout(window.storage.set(key, JSON.stringify(value), true), 5000, null);
-  } catch (e) {
-    console.error("storageSet error", key, e);
-  }
+  return sbSet(key, value);
 }
 
 async function storageGetPrivate(key, fallback) {
   return fallback;
 }
+
 
 const APP_VERSION = "2026-06-25.3";
 
@@ -351,7 +391,7 @@ export default function App() {
           needsMigration = true;
         }
       }
-      if (needsMigration && !IS_LOCALHOST) {
+      if (needsMigration && IS_CLAUDE_ARTIFACT) {
         await withTimeout(window.storage.set(K_PRODUCTS, JSON.stringify(migratedProducts), true), 8000, null);
       }
       const finalProducts = needsMigration ? migratedProducts : p;
