@@ -164,8 +164,10 @@ function getStockQuality(product) {
   const avgDay = (product.vendas30 || 0) / 30;
   const estoque = product.estoque || 0;
   const stockDays = avgDay > 0 ? estoque / avgDay : (estoque > 0 ? Infinity : 0);
-  const capitalImobilizado = estoque * custoLiq(product);
   const isExcess = stockDays > STOCK_QUALITY_THRESHOLD_DAYS;
+  const idealMax = avgDay * STOCK_QUALITY_THRESHOLD_DAYS;
+  const excessUnits = Math.max(0, estoque - idealMax);
+  const capitalImobilizado = excessUnits * custoLiq(product);
   return { avgDay, stockDays, capitalImobilizado, isExcess };
 }
 
@@ -506,6 +508,9 @@ export default function App() {
             persistOrders={persistOrders}
           />
         )}
+        {mainTab === "compras" && subTab === "overview" && (
+          <OverviewTab products={products} persistProducts={persistProducts} settings={settings} />
+        )}
         {mainTab === "compras" && subTab === "suppliers" && (
           <SuppliersTab
             products={products}
@@ -550,9 +555,10 @@ const NAV_STRUCTURE = [
   },
   {
     id: "compras",
-    label: "Compras",
+    label: "Fornecedores",
     icon: ShoppingCart,
     subItems: [
+      { id: "overview", label: "Visão Geral" },
       { id: "suppliers", label: "Fornecedores" },
       { id: "generated-order", label: "Pedido Gerado" },
     ],
@@ -1838,6 +1844,20 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
   const salesSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.vendas30 !== undefined).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.vendas30 ?? 0 })), [currentProduct.salesHistory]);
   const stockSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.estoque !== undefined).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.estoque ?? 0 })), [currentProduct.salesHistory]);
 
+  // Capital excedente por importação: unidades acima de 90d de cobertura × custo líquido
+  const excessSeries = useMemo(() => {
+    const custo = custoLiq(currentProduct);
+    return (currentProduct.salesHistory || [])
+      .filter((s) => s.estoque !== undefined)
+      .sort((a, b) => a.ts - b.ts)
+      .map((s) => {
+        const avgDay  = (s.vendas30 || 0) / 30;
+        const idealMax = avgDay * STOCK_QUALITY_THRESHOLD_DAYS;
+        const excess  = Math.max(0, (s.estoque || 0) - idealMax);
+        return { ts: s.ts, capital: excess * custo };
+      });
+  }, [currentProduct.salesHistory, currentProduct.custoLiquido, currentProduct.precoCusto]);
+
   async function saveObs() {
     const text = obsText.trim();
     if (!text) return;
@@ -1871,6 +1891,12 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
             {stockSeries.length >= 2
               ? <MiniLineChart series={stockSeries} valueKey="total" color="var(--amber)" unit="un" title={`Estoque — ${fmtDateShort(stockSeries[0].ts)} a ${fmtDateShort(stockSeries[stockSeries.length-1].ts)}`} />
               : <div className="vivo-capital-chart-empty"><span>Dados insuficientes para gráfico de estoque</span></div>
+            }
+          </div>
+          <div className="vivo-drawer-chart-block">
+            {excessSeries.length >= 2
+              ? <MiniCurrencyChart series={excessSeries} color="var(--rust)" title={`Capital excedente (>90d) — ${fmtDateShort(excessSeries[0].ts)} a ${fmtDateShort(excessSeries[excessSeries.length-1].ts)}`} />
+              : <div className="vivo-capital-chart-empty"><span>Dados insuficientes para gráfico de capital excedente</span></div>
             }
           </div>
           <div className="vivo-drawer-obs-section">
@@ -2206,6 +2232,177 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ====================== OVERVIEW TAB ======================
+function OverviewTab({ products, persistProducts, settings }) {
+  const [sortCol, setSortCol]   = useState("capitalExc");
+  const [sortDir, setSortDir]   = useState("desc");
+  const [drawerProduct, setDrawerProduct] = useState(null);
+
+  function toggleSort(col) {
+    if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("desc"); }
+  }
+
+  function SortBtn({ col }) {
+    const active = sortCol === col;
+    return (
+      <button className="vivo-sort-btn" onClick={() => toggleSort(col)}>
+        {active ? (sortDir === "desc" ? "▼" : "▲") : "⇅"}
+      </button>
+    );
+  }
+
+  // Todos os produtos ativos com métricas calculadas
+  const skus = useMemo(() => {
+    return Object.values(products)
+      .filter((p) => !p.inactive)
+      .map((p) => {
+        const q          = getStockQuality(p);
+        const avgDay     = (p.vendas30 || 0) / 30;
+        const coverageDays = avgDay > 0 ? Math.floor((p.estoque || 0) / avgDay) : null;
+        const status     = q.isExcess
+          ? "excesso"
+          : avgDay > 0 && coverageDays !== null && coverageDays < 15
+            ? "critico" : "ok";
+        return {
+          ...p, quality: q, avgDay, coverageDays, status,
+          estoqueR:   (p.estoque || 0) * custoLiq(p),
+          capitalExc: q.capitalImobilizado,
+        };
+      });
+  }, [products]);
+
+  const skusSorted = useMemo(() => {
+    return [...skus].sort((a, b) => {
+      const va = a[sortCol] ?? -Infinity;
+      const vb = b[sortCol] ?? -Infinity;
+      if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
+      return sortDir === "desc" ? vb - va : va - vb;
+    });
+  }, [skus, sortCol, sortDir]);
+
+  const { page, setPage, totalPages, pageItems, totalCount } = usePagination(skusSorted);
+
+  // Série de capital excedente global (todos os fornecedores)
+  const excessCodes = useMemo(() => new Set(skus.filter((p) => p.quality.isExcess).map((p) => p.codigo)), [skus]);
+  const excessSeries = useMemo(() => buildExcessStockSeries(products, "all", 90, 90), [products]);
+
+  const totalCapital  = skus.reduce((acc, p) => acc + p.capitalExc, 0);
+  const totalEstoque  = skus.reduce((acc, p) => acc + p.estoqueR, 0);
+  const criticos      = skus.filter((p) => p.status === "critico").length;
+  const emExcesso     = skus.filter((p) => p.status === "excesso").length;
+
+  return (
+    <div className="vivo-page">
+      <header className="vivo-page-head">
+        <h1>Visão Geral</h1>
+        <p>Todos os produtos ativos — capital excedente calculado pelo custo líquido.</p>
+      </header>
+
+      {/* KPIs */}
+      <div className="vivo-supplier-kpis" style={{ marginBottom: 20 }}>
+        <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">Estoque Total R$</span>
+          <span className="vivo-kpi-value">{fmtCurrency(totalEstoque)}</span>
+        </div>
+        <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">Capital Excedente</span>
+          <span className="vivo-kpi-value vivo-kpi-danger">{fmtCurrency(totalCapital)}</span>
+        </div>
+        <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">SKUs Críticos</span>
+          <span className={"vivo-kpi-value" + (criticos > 0 ? " vivo-kpi-danger" : "")}>{criticos}</span>
+        </div>
+        <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">SKUs em Excesso</span>
+          <span className={"vivo-kpi-value" + (emExcesso > 0 ? " vivo-kpi-warn" : "")}>{emExcesso}</span>
+        </div>
+        <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">Total de SKUs</span>
+          <span className="vivo-kpi-value">{skus.length}</span>
+        </div>
+      </div>
+
+      {/* Gráfico de capital excedente global */}
+      <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 20 }}>
+        <MiniCurrencyChart
+          series={excessSeries}
+          color="var(--rust)"
+          title={excessSeries.length >= 2
+            ? `Capital excedente total (>90d, custo líq.) — ${fmtDateShort(excessSeries[0].ts)} a ${fmtDateShort(excessSeries[excessSeries.length-1].ts)}`
+            : "Capital excedente total (>90d de cobertura)"}
+        />
+      </div>
+
+      {/* Tabela geral de SKUs */}
+      <div className="vivo-table-wrap vivo-card">
+        <table className="vivo-table vivo-table-compact">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Fornecedor <SortBtn col="fornecedor" /></th>
+              <th className="mono">SKU</th>
+              <th className="num">Estoque <SortBtn col="estoque" /></th>
+              <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
+              <th className="num">Cobertura <SortBtn col="coverageDays" /></th>
+              <th className="num">Custo Líq. <SortBtn col="custoLiquido" /></th>
+              <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
+              <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
+              <th>Situação</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((p) => (
+              <tr
+                key={p.codigo}
+                style={{ cursor: "pointer" }}
+                className={drawerProduct?.codigo === p.codigo ? "is-selected" : ""}
+                onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
+              >
+                <td className="vivo-item-cell" title={p.item}>{p.item}</td>
+                <td>{p.fornecedor}</td>
+                <td className="mono">{p.codigo}</td>
+                <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
+                <td className="num mono">{p.vendas30 ?? "—"}</td>
+                <td className={"num mono" + (p.status === "critico" ? " vivo-below-min" : "")}>
+                  {p.coverageDays !== null ? `${p.coverageDays}d` : "—"}
+                </td>
+                <td className="num mono" title={p.precoCusto ? `Custo de nota: ${fmtCurrency(p.precoCusto)}` : ""}>
+                  {custoLiq(p) ? fmtCurrency(custoLiq(p)) : "—"}
+                </td>
+                <td className="num mono">{fmtCurrency(p.estoqueR)}</td>
+                <td className={"num mono" + (p.quality.isExcess ? " vivo-below-min" : "")}>
+                  {p.quality.isExcess ? fmtCurrency(p.capitalExc) : "—"}
+                </td>
+                <td>
+                  {p.status === "critico" && <span className="vivo-badge vivo-badge-danger">Crítico</span>}
+                  {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
+                  {p.status === "ok"      && <span className="vivo-badge vivo-badge-ok">OK</span>}
+                </td>
+              </tr>
+            ))}
+            {pageItems.length === 0 && (
+              <tr><td colSpan={10} className="vivo-table-empty">Nenhum produto importado.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <PaginationControls page={page} setPage={setPage} totalPages={totalPages} totalCount={totalCount} />
+
+      {/* Drawer — mesmo componente usado dentro do fornecedor */}
+      {drawerProduct && (
+        <SkuDrawer
+          product={drawerProduct}
+          products={products}
+          persistProducts={persistProducts}
+          onClose={() => setDrawerProduct(null)}
+        />
+      )}
     </div>
   );
 }
