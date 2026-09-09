@@ -1988,12 +1988,18 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
       for (const snap of (p.salesHistory || [])) {
         if (snap.ts < cutoff || snap.vendas30 === undefined) continue;
         const dk = dayKey(snap.ts);
-        if (!byDay[dk]) byDay[dk] = { ts: snap.ts, total: 0 };
-        byDay[dk].total += snap.vendas30 || 0;
+        if (!byDay[dk]) byDay[dk] = { ts: snap.ts, items: {} };
+        // Guarda só o snapshot mais recente de cada produto naquele dia
+        if (!byDay[dk].items[p.codigo] || snap.ts > byDay[dk].items[p.codigo].ts) {
+          byDay[dk].items[p.codigo] = { ts: snap.ts, vendas30: snap.vendas30 || 0 };
+        }
         if (snap.ts > byDay[dk].ts) byDay[dk].ts = snap.ts;
       }
     }
-    return Object.values(byDay).sort((a, b) => a.ts - b.ts);
+    // Soma um valor por produto por dia
+    return Object.values(byDay)
+      .map((d) => ({ ts: d.ts, total: Object.values(d.items).reduce((acc, i) => acc + i.vendas30, 0) }))
+      .sort((a, b) => a.ts - b.ts);
   }, [skus]);
 
   const totalStockSeries = useMemo(() => buildTotalStockSeries(products, fornecedor, 90), [products, fornecedor]);
