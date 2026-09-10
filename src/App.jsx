@@ -2097,7 +2097,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
   );
 }
 
-function MiniCurrencyChart({ series, color, title }) {
+function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
   const [hover, setHover] = useState(null);
   const svgRef = React.useRef(null);
 
@@ -2154,6 +2154,27 @@ function MiniCurrencyChart({ series, color, title }) {
           {gridLines.map((g, gi) => (<g key={gi}><line x1={PAD.left} y1={g.y} x2={PAD.left + innerW} y2={g.y} stroke="var(--line)" strokeWidth="1" strokeDasharray="4,3" /><text x={PAD.left - 6} y={g.y + 4} fontSize="8.5" fill="var(--ink-soft)" textAnchor="end">{g.label}</text></g>))}
           <polygon points={areaPoints} fill={`url(#${gradId})`} />
           <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {/* Linha de meta tracejada */}
+          {metaSeries && metaSeries.length >= 2 && (() => {
+            const metaPoints = metaSeries
+              .map((s, i) => {
+                const idx = series.findIndex((_, si) => Math.abs(series[si]?.ts - s.ts) < MS_PER_DAY / 2);
+                const x = idx >= 0 ? toX(idx) : PAD.left + (i / (metaSeries.length - 1)) * innerW;
+                return `${x},${toY(s.capital)}`;
+              })
+              .join(" ");
+            const lastMeta = metaSeries[metaSeries.length - 1];
+            const lastMetaX = toX(series.length - 1);
+            const lastMetaY = toY(lastMeta.capital);
+            return (
+              <g>
+                <polyline points={metaPoints} fill="none" stroke="var(--olive-dark)" strokeWidth="1.5" strokeDasharray="6,3" opacity="0.7" />
+                <text x={lastMetaX - 4} y={lastMetaY - 6} fontSize="9" fill="var(--olive-dark)" textAnchor="end" fontWeight="600">
+                  {metaLabel || "Meta"}
+                </text>
+              </g>
+            );
+          })()}
           {hover && <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
           <circle cx={hover ? hover.x : toX(series.length - 1)} cy={hover ? hover.y : toY(last.capital)} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
           {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.i)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
@@ -2295,12 +2316,19 @@ function OverviewTab({ products, persistProducts, settings }) {
 
   // Série de capital excedente global (todos os fornecedores)
   const excessCodes = useMemo(() => new Set(skus.filter((p) => p.quality.isExcess).map((p) => p.codigo)), [skus]);
-  const excessSeries = useMemo(() => buildExcessStockSeries(products, "all", 90, 90), [products]);
+  const excessSeries    = useMemo(() => buildExcessStockSeries(products, "all", 90, 90), [products]);
+  const totalStockSeries = useMemo(() => buildTotalStockSeries(products, "all", 90), [products]);
 
   const totalCapital  = skus.reduce((acc, p) => acc + p.capitalExc, 0);
   const totalEstoque  = skus.reduce((acc, p) => acc + p.estoqueR, 0);
+  const pctExcesso    = totalEstoque > 0 ? (totalCapital / totalEstoque) * 100 : 0;
   const criticos      = skus.filter((p) => p.status === "critico").length;
   const emExcesso     = skus.filter((p) => p.status === "excesso").length;
+
+  // Série de meta: 10% do estoque total em cada data
+  const metaSeries = useMemo(() => {
+    return totalStockSeries.map((s) => ({ ts: s.ts, capital: s.capital * 0.10 }));
+  }, [totalStockSeries]);
 
   return (
     <div className="vivo-page">
@@ -2320,6 +2348,12 @@ function OverviewTab({ products, persistProducts, settings }) {
           <span className="vivo-kpi-value vivo-kpi-danger">{fmtCurrency(totalCapital)}</span>
         </div>
         <div className="vivo-kpi-card">
+          <span className="vivo-kpi-label">% Excedente / Estoque</span>
+          <span className={"vivo-kpi-value" + (pctExcesso > 10 ? " vivo-kpi-danger" : pctExcesso > 5 ? " vivo-kpi-warn" : " vivo-above-min")}>
+            {pctExcesso.toFixed(1)}%
+          </span>
+        </div>
+        <div className="vivo-kpi-card">
           <span className="vivo-kpi-label">SKUs Críticos</span>
           <span className={"vivo-kpi-value" + (criticos > 0 ? " vivo-kpi-danger" : "")}>{criticos}</span>
         </div>
@@ -2333,11 +2367,24 @@ function OverviewTab({ products, persistProducts, settings }) {
         </div>
       </div>
 
-      {/* Gráfico de capital excedente global */}
+      {/* Gráfico de estoque total */}
+      <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 16 }}>
+        <MiniCurrencyChart
+          series={totalStockSeries}
+          color="var(--olive-dark)"
+          title={totalStockSeries.length >= 2
+            ? `Estoque total (custo líq.) — ${fmtDateShort(totalStockSeries[0].ts)} a ${fmtDateShort(totalStockSeries[totalStockSeries.length-1].ts)}`
+            : "Estoque total em R$"}
+        />
+      </div>
+
+      {/* Gráfico de capital excedente global com linha de meta 10% */}
       <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 20 }}>
         <MiniCurrencyChart
           series={excessSeries}
           color="var(--rust)"
+          metaSeries={metaSeries}
+          metaLabel="Meta 10%"
           title={excessSeries.length >= 2
             ? `Capital excedente total (>90d, custo líq.) — ${fmtDateShort(excessSeries[0].ts)} a ${fmtDateShort(excessSeries[excessSeries.length-1].ts)}`
             : "Capital excedente total (>90d de cobertura)"}
