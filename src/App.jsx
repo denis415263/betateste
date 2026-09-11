@@ -28,7 +28,8 @@ const HEADER_MAP = {
   vendas30: ["vendas_30_dias", "vendas30", "qtd_vendida_30_dias", "vendas_ultimos_30_dias", "30_dias"],
   vendas90: ["vendas_90_dias", "vendas90", "qtd_vendida_90_dias", "vendas_ultimos_90_dias", "90_dias"],
   vendas180: ["vendas_180_dias", "vendas180", "qtd_vendida_180_dias", "vendas_ultimos_180_dias", "180_dias"],
-  precoCusto: ["vlr_custo", "valor_custo", "preco_custo", "preco_de_custo", "custo_unitario", "custo_medio", "vlr_de_custo", "custo"],
+  precoCusto: [], // nunca vem do relatório — só da Pasta1.xlsx (Tabela de preços)
+  custoErp: ["vlr_custo", "valor_custo", "preco_custo", "preco_de_custo", "custo_unitario", "custo_medio", "vlr_de_custo", "custo"],
 };
 
 function mapRowToFields(row) {
@@ -356,13 +357,16 @@ export default function App() {
   const [settings, setSettings] = useState({ defaultCoverageDays: 30, supplierCoverageDays: {} });
   const [orders, setOrders] = useState([]);
   const [generatedOrder, setGeneratedOrder] = useState(null);
+  const [selectedSupplierFromBrands, setSelectedSupplierFromBrands] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [mainTab, setMainTab] = useState("compras");
   const [subTab, setSubTab]   = useState("overview");
   const [authed, setAuthed] = useState(true);
   const [migration, setMigration] = useState({ checked: false, available: false, running: false, done: false, error: null });
 
-  function goTo(mainId, subId) {
+  function goTo(mainId, subId, opts = {}) {
+    // Se navegar para suppliers sem vir de Brands (sem opts.supplierOverride), limpa o pré-selecionado
+    if (subId === "suppliers" && !opts.fromBrands) setSelectedSupplierFromBrands(null);
     setMainTab(mainId);
     setSubTab(subId);
   }
@@ -511,12 +515,21 @@ export default function App() {
         {mainTab === "compras" && subTab === "overview" && (
           <OverviewTab products={products} persistProducts={persistProducts} settings={settings} />
         )}
+        {mainTab === "compras" && subTab === "brands" && (
+          <BrandsTab
+            products={products}
+            settings={settings}
+            persistSettings={persistSettings}
+            onSelectSupplier={(f) => { setSelectedSupplierFromBrands(f); goTo("compras", "suppliers", { fromBrands: true }); }}
+          />
+        )}
         {mainTab === "compras" && subTab === "suppliers" && (
           <SuppliersTab
             products={products}
             settings={settings}
             persistSettings={persistSettings}
             persistProducts={persistProducts}
+            initialSupplier={selectedSupplierFromBrands}
             onGenerateOrder={(order) => { setGeneratedOrder(order); goTo("compras", "generated-order"); }}
           />
         )}
@@ -543,23 +556,13 @@ export default function App() {
 
 const NAV_STRUCTURE = [
   {
-    id: "relatorios",
-    label: "Relatórios",
-    icon: Upload,
-    subItems: [
-      { id: "import", label: "Subir relatório" },
-      { id: "prices", label: "Tabela de preços" },
-      { id: "history", label: "Histórico de importações" },
-      { id: "cleanup", label: "Limpeza de itens" },
-    ],
-  },
-  {
     id: "compras",
     label: "Fornecedores",
     icon: ShoppingCart,
     subItems: [
       { id: "overview", label: "Visão Geral" },
-      { id: "suppliers", label: "Fornecedores" },
+      { id: "brands", label: "Visão Marcas" },
+      { id: "suppliers", label: "Compras" },
       { id: "generated-order", label: "Pedido Gerado" },
     ],
   },
@@ -578,6 +581,17 @@ const NAV_STRUCTURE = [
     subItems: [
       { id: "analise", label: "Análise" },
       { id: "monitorados", label: "Monitorados" },
+    ],
+  },
+  {
+    id: "relatorios",
+    label: "Relatórios",
+    icon: Upload,
+    subItems: [
+      { id: "import", label: "Subir relatório" },
+      { id: "prices", label: "Tabela de preços" },
+      { id: "history", label: "Histórico de importações" },
+      { id: "cleanup", label: "Limpeza de itens" },
     ],
   },
 ];
@@ -879,15 +893,16 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
         const fornecedor = String(row.fornecedor).trim();
         const item = String(row.item || "").trim() || codigo;
         const estoque = toNumber(row.estoque);
-        const precoCusto = row.precoCusto !== undefined && row.precoCusto !== "" ? toNumber(row.precoCusto) : undefined;
+        // custo do ERP vai para custoLiquido — precoCusto só vem da Pasta1.xlsx (Tabela de preços)
+        const custoErp = row.custoErp !== undefined && row.custoErp !== "" ? toNumber(row.custoErp) : undefined;
 
         if (!merged[codigo]) {
-          merged[codigo] = { codigo, fornecedor, item, estoque, precoCusto, vendas: {} };
+          merged[codigo] = { codigo, fornecedor, item, estoque, custoErp, vendas: {} };
         }
         merged[codigo].estoque = estoque;
         merged[codigo].fornecedor = fornecedor || merged[codigo].fornecedor;
         merged[codigo].item = item || merged[codigo].item;
-        if (precoCusto !== undefined) merged[codigo].precoCusto = precoCusto;
+        if (custoErp !== undefined) merged[codigo].custoErp = custoErp;
 
         let salesValue;
         if (file.period === 30) salesValue = row.vendas30 !== undefined ? row.vendas30 : row.vendas90 !== undefined ? row.vendas90 : row.vendas180;
@@ -907,7 +922,15 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
       const v30 = m.vendas[30];
       const v90 = m.vendas[90];
       const v180 = m.vendas[180];
-      const salesSnapshot = { ts: now, vendas30: v30, vendas90: v90, vendas180: v180, estoque: m.estoque, precoCusto: m.precoCusto, custoLiquido: existing?.custoLiquido ?? undefined };
+
+      // custoLiquido: prefere o da tabela (existing.custoLiquido), senão usa o do ERP
+      const custoLiquidoFinal = existing?.custoLiquido ?? m.custoErp ?? undefined;
+      const salesSnapshot = {
+        ts: now, vendas30: v30, vendas90: v90, vendas180: v180,
+        estoque: m.estoque,
+        custoLiquido: custoLiquidoFinal,
+        precoCusto: existing?.precoCusto ?? undefined, // nunca sobrescreve, só preserva
+      };
 
       if (existing) {
         updatedCount++;
@@ -916,7 +939,10 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
           fornecedor: m.fornecedor || existing.fornecedor,
           item: m.item || existing.item,
           estoque: m.estoque,
-          precoCusto: m.precoCusto !== undefined ? m.precoCusto : existing.precoCusto,
+          // precoCusto NUNCA é sobrescrito pela importação do relatório
+          precoCusto: existing.precoCusto,
+          // custoLiquido: mantém o da tabela se existir, senão usa o do ERP
+          custoLiquido: existing.custoLiquido ?? m.custoErp ?? existing.custoLiquido,
           vendas30: v30 !== undefined ? v30 : existing.vendas30,
           vendas90: v90 !== undefined ? v90 : existing.vendas90,
           vendas180: v180 !== undefined ? v180 : existing.vendas180,
@@ -930,7 +956,8 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
           fornecedor: m.fornecedor,
           item: m.item,
           estoque: m.estoque,
-          precoCusto: m.precoCusto,
+          precoCusto: undefined, // será preenchido pela Tabela de preços
+          custoLiquido: m.custoErp, // usa custo do ERP como líquido até a tabela ser importada
           vendas30: v30,
           vendas90: v90,
           vendas180: v180,
@@ -1072,7 +1099,7 @@ function ProductsTab({ products, persistProducts, settings }) {
   const [sortBy, setSortBy] = useState("fornecedor_codigo");
   const [expanded, setExpanded] = useState(null);
 
-  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive), [products]);
+  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive && !String(p.codigo || "").startsWith("__")), [products]);
   const suppliers = useMemo(() => {
     const s = new Set(list.map((p) => p.fornecedor));
     return Array.from(s).sort();
@@ -1164,7 +1191,7 @@ function PerformanceTab({ products }) {
   const [trendFilter, setTrendFilter] = useState("all");
   const [sortBy, setSortBy] = useState("deltaPct");
 
-  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive), [products]);
+  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive && !String(p.codigo || "").startsWith("__")), [products]);
   const suppliers = useMemo(() => {
     const s = new Set(list.map((p) => p.fornecedor));
     return Array.from(s).sort();
@@ -1437,7 +1464,7 @@ function StockQualityTab({ products, persistProducts }) {
   function syncFromTop(e) { if (tableWrapRef.current) tableWrapRef.current.scrollLeft = e.target.scrollLeft; }
   function syncFromTable(e) { if (topScrollRef.current) topScrollRef.current.scrollLeft = e.target.scrollLeft; }
 
-  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive), [products]);
+  const list = useMemo(() => Object.values(products).filter((p) => !p.inactive && !String(p.codigo || "").startsWith("__")), [products]);
   const computed = useMemo(() => list.map((p) => ({ ...p, quality: getStockQuality(p) })).filter((p) => p.quality.isExcess), [list]);
   const excessCodes = useMemo(() => new Set(computed.map((p) => p.codigo)), [computed]);
   const suppliers = useMemo(() => Array.from(new Set(computed.map((p) => p.fornecedor))).sort(), [computed]);
@@ -2094,7 +2121,70 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
         </div>
       </div>
 
+      {/* Comentários do fornecedor */}
+      <SupplierComments fornecedor={fornecedor} products={products} persistProducts={persistProducts} />
+
       {drawerProduct && <SkuDrawer product={drawerProduct} products={products} persistProducts={persistProducts} onClose={() => setDrawerProduct(null)} />}
+    </div>
+  );
+}
+
+// Comentários por fornecedor — salvos em um produto "virtual" de chave __comments__<fornecedor>
+function SupplierComments({ fornecedor, products, persistProducts }) {
+  const [obsText, setObsText] = useState("");
+  const [saving, setSaving]   = useState(false);
+
+  const key = `__supplier_comments__${fornecedor}`;
+  const current = products[key] || {};
+  const observations = current.observations || [];
+
+  async function saveObs() {
+    const text = obsText.trim();
+    if (!text) return;
+    setSaving(true);
+    const newObs = { ts: Date.now(), text };
+    const next = {
+      ...products,
+      [key]: { ...current, observations: [newObs, ...observations] },
+    };
+    await persistProducts(next);
+    setObsText("");
+    setSaving(false);
+  }
+
+  return (
+    <div className="vivo-card" style={{ padding: "18px 20px", marginTop: 18 }}>
+      <div className="vivo-capital-chart-label" style={{ marginBottom: 12 }}>Comentários do fornecedor</div>
+      <div className="vivo-drawer-obs-input-row">
+        <textarea
+          className="vivo-drawer-obs-input"
+          placeholder="Digite um comentário sobre este fornecedor…"
+          value={obsText}
+          onChange={(e) => setObsText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveObs(); } }}
+          rows={2}
+        />
+        <button className="vivo-btn vivo-btn-primary" onClick={saveObs} disabled={saving || !obsText.trim()}>
+          {saving ? "…" : "Salvar"}
+        </button>
+      </div>
+      <div className="vivo-drawer-obs-hint" style={{ marginTop: 4 }}>Enter para salvar · Shift+Enter para nova linha</div>
+      {observations.length > 0 ? (
+        <div className="vivo-drawer-obs-list" style={{ marginTop: 12 }}>
+          {observations.map((obs, i) => (
+            <div key={i} className="vivo-drawer-obs-item">
+              <span className="vivo-drawer-obs-date">
+                {new Date(obs.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" })}
+                {" "}
+                {new Date(obs.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+              </span>
+              <span className="vivo-drawer-obs-text">{obs.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="vivo-drawer-obs-empty" style={{ marginTop: 10 }}>Nenhum comentário ainda.</p>
+      )}
     </div>
   );
 }
@@ -2462,7 +2552,150 @@ function OverviewTab({ products, persistProducts, settings }) {
   );
 }
 
-function SuppliersTab({ products, settings, persistSettings, persistProducts, onGenerateOrder }) {
+// ====================== BRANDS TAB ======================
+function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
+  const [sortCol, setSortCol] = useState("fornecedor");
+  const [sortDir, setSortDir] = useState("asc");
+  const [tagFilter, setTagFilter] = useState("all");
+
+  const TAG_STYLES = {
+    escalando:  { background: "#e1ecd9", color: "#3c6b2a", fontWeight: 600 },
+    liquidacao: { background: "var(--rust-soft)", color: "var(--rust)", fontWeight: 600 },
+    inativo:    { background: "#e8e8e8", color: "#333", fontWeight: 600 },
+  };
+  const TAG_LABELS = { escalando: "Escalando", liquidacao: "Liquidação", inativo: "Inativo" };
+  const TAG_OPTIONS = [{ value: "", label: "—" }, { value: "escalando", label: "Escalando" }, { value: "liquidacao", label: "Liquidação" }, { value: "inativo", label: "Inativo" }];
+
+  async function setTag(fornecedor, value) {
+    const next = { ...settings.supplierTags, [fornecedor]: value || null };
+    await persistSettings({ ...settings, supplierTags: next });
+  }
+
+  function toggleSort(col) {
+    if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir(col === "fornecedor" ? "asc" : "desc"); }
+  }
+
+  function SortBtn({ col }) {
+    const active = sortCol === col;
+    return (
+      <button className="vivo-sort-btn" onClick={() => toggleSort(col)}>
+        {active ? (sortDir === "desc" ? "▼" : "▲") : "⇅"}
+      </button>
+    );
+  }
+
+  const supplierTags = settings.supplierTags || {};
+
+  const rows = useMemo(() => {
+    const seen = new Set();
+    const suppliers = Object.values(products)
+      .filter((p) => !p.inactive && p.fornecedor)
+      .map((p) => p.fornecedor)
+      .filter((f) => { if (seen.has(f)) return false; seen.add(f); return true; });
+
+    return suppliers.map((f) => {
+      const prods = Object.values(products).filter((p) => !p.inactive && p.fornecedor === f);
+      const estoqueR = prods.reduce((acc, p) => acc + (p.estoque || 0) * custoLiq(p), 0);
+      const capitalExc = prods.reduce((acc, p) => acc + getStockQuality(p).capitalImobilizado, 0);
+      const pct = estoqueR > 0 ? (capitalExc / estoqueR) * 100 : 0;
+      const tag = supplierTags[f] || "";
+      return { fornecedor: f, estoqueR, capitalExc, pct, tag };
+    });
+  }, [products, supplierTags]);
+
+  const filtered = useMemo(() => {
+    let out = rows;
+    if (tagFilter !== "all") {
+      if (tagFilter === "") out = out.filter((r) => !r.tag);
+      else out = out.filter((r) => r.tag === tagFilter);
+    }
+    return [...out].sort((a, b) => {
+      const va = a[sortCol], vb = b[sortCol];
+      if (sortCol === "fornecedor" || sortCol === "tag") {
+        return sortDir === "asc"
+          ? String(va || "").localeCompare(String(vb || ""), "pt-BR")
+          : String(vb || "").localeCompare(String(va || ""), "pt-BR");
+      }
+      return sortDir === "desc" ? (vb || 0) - (va || 0) : (va || 0) - (vb || 0);
+    });
+  }, [rows, tagFilter, sortCol, sortDir]);
+
+  const totalEstoque  = filtered.reduce((acc, r) => acc + r.estoqueR, 0);
+  const totalCapital  = filtered.reduce((acc, r) => acc + r.capitalExc, 0);
+  const totalPct      = totalEstoque > 0 ? (totalCapital / totalEstoque) * 100 : 0;
+
+  if (rows.length === 0) return <div className="vivo-page"><EmptyState icon={Package} title="Nenhum fornecedor" text="Importe relatórios para que os fornecedores apareçam aqui." /></div>;
+
+  return (
+    <div className="vivo-page">
+      <header className="vivo-page-head">
+        <h1>Visão Marcas</h1>
+        <p>Resumo financeiro por fornecedor. Clique no nome para abrir o detalhe.</p>
+      </header>
+
+      {/* Filtro de tags */}
+      <div className="vivo-toolbar">
+        <div className="vivo-supplier-tag-chips">
+          <span className="vivo-supplier-tag-label">Tag:</span>
+          <button className={"vivo-supplier-tag-chip" + (tagFilter === "all" ? " is-active-neutral" : "")} onClick={() => setTagFilter("all")}>Todas</button>
+          <button className={"vivo-supplier-tag-chip" + (tagFilter === "" ? " is-active-neutral" : "")} onClick={() => setTagFilter(tagFilter === "" ? "all" : "")}>Sem tag</button>
+          <button className={"vivo-supplier-tag-chip vivo-stag-escalando" + (tagFilter === "escalando" ? " is-active" : "")} onClick={() => setTagFilter(tagFilter === "escalando" ? "all" : "escalando")}>Escalando</button>
+          <button className={"vivo-supplier-tag-chip vivo-stag-liquidacao" + (tagFilter === "liquidacao" ? " is-active" : "")} onClick={() => setTagFilter(tagFilter === "liquidacao" ? "all" : "liquidacao")}>Liquidação</button>
+          <button className={"vivo-supplier-tag-chip vivo-stag-inativo" + (tagFilter === "inativo" ? " is-active" : "")} onClick={() => setTagFilter(tagFilter === "inativo" ? "all" : "inativo")}>Inativo</button>
+        </div>
+      </div>
+
+      <div className="vivo-table-wrap vivo-card">
+        <table className="vivo-table vivo-table-compact">
+          <thead>
+            <tr>
+              <th>Fornecedor <SortBtn col="fornecedor" /></th>
+              <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
+              <th className="num">Capital Exc. R$ <SortBtn col="capitalExc" /></th>
+              <th className="num">% Cap. Exc. <SortBtn col="pct" /></th>
+              <th>Tag <SortBtn col="tag" /></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => (
+              <tr key={r.fornecedor} style={{ cursor: "pointer" }} onClick={() => onSelectSupplier(r.fornecedor)}>
+                <td className="vivo-supplier-name-link">{r.fornecedor}</td>
+                <td className="num mono">{fmtCurrency(r.estoqueR)}</td>
+                <td className={"num mono" + (r.capitalExc > 0 ? " vivo-below-min" : "")}>{fmtCurrency(r.capitalExc)}</td>
+                <td className={"num mono" + (r.pct > 10 ? " vivo-below-min" : r.pct > 5 ? " vivo-kpi-warn" : r.pct > 0 ? " vivo-above-min" : "")}>
+                  {r.pct.toFixed(1)}%
+                </td>
+                <td onClick={(e) => e.stopPropagation()}>
+                  <select
+                    className="vivo-select-tag"
+                    style={r.tag ? { ...TAG_STYLES[r.tag], border: "none", borderRadius: 6, padding: "3px 8px" } : {}}
+                    value={r.tag}
+                    onChange={(e) => setTag(r.fornecedor, e.target.value)}
+                  >
+                    {TAG_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                </td>
+              </tr>
+            ))}
+            {/* Linha de totais */}
+            <tr style={{ borderTop: "2px solid var(--line)", fontWeight: 600 }}>
+              <td>Total ({filtered.length} marcas)</td>
+              <td className="num mono">{fmtCurrency(totalEstoque)}</td>
+              <td className={"num mono" + (totalCapital > 0 ? " vivo-below-min" : "")}>{fmtCurrency(totalCapital)}</td>
+              <td className={"num mono" + (totalPct > 10 ? " vivo-below-min" : totalPct > 5 ? " vivo-kpi-warn" : " vivo-above-min")}>
+                {totalPct.toFixed(1)}%
+              </td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function SuppliersTab({ products, settings, persistSettings, persistProducts, onGenerateOrder, initialSupplier }) {
   const [sortCol, setSortCol] = useState("fornecedor");
   const [sortDir, setSortDir] = useState("asc");
   const [tagFilter, setTagFilter] = useState("all");
@@ -2471,7 +2704,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
   const [minC30, setMinC30] = useState("");
   const [maxC30, setMaxC30] = useState("");
   const [scrollWidth, setScrollWidth] = useState(0);
-  const [selectedSupplier, setSelectedSupplier] = useState(null);
+  const [selectedSupplier, setSelectedSupplier] = useState(initialSupplier || null);
   const topScrollRef = React.useRef(null);
   const tableWrapRef = React.useRef(null);
 
@@ -2519,6 +2752,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
     liquidacao: { background: "var(--rust-soft)", color: "var(--rust)", fontWeight: 600 },
     inativo: { background: "#e8e8e8", color: "#333", fontWeight: 600 },
   };
+  const TAG_LABELS = { escalando: "Escalando", liquidacao: "Liquidação", inativo: "Inativo" };
 
   const suppliers = useMemo(() => {
     const seen = new Set();
@@ -2597,10 +2831,10 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
         <table className="vivo-table vivo-table-suppliers">
           <thead>
             <tr>
-              <th onClick={() => toggleSort("fornecedor")} className="vivo-th-sortable">Fornecedor <SortIcon col="fornecedor" /></th>
+              <th onClick={() => toggleSort("fornecedor")} className="vivo-th-sortable" style={{ width: 140, minWidth: 140 }}>Fornecedor <SortIcon col="fornecedor" /></th>
               <th onClick={() => toggleSort("tag")} className="vivo-th-sortable">Tag <SortIcon col="tag" /></th>
-              <th className="num vivo-th-custom">Cobertura (dias)</th>
-              <th onClick={() => toggleSort("cCustom")} className="num vivo-th-sortable vivo-th-custom">Compra Personalizada <SortIcon col="cCustom" /></th>
+              <th className="num vivo-th-custom" style={{ width: 80 }}>Cobertura</th>
+              <th onClick={() => toggleSort("cCustom")} className="num vivo-th-sortable vivo-th-custom" style={{ width: 100 }}>Compra Pers. <SortIcon col="cCustom" /></th>
               <th className="vivo-th-custom"></th>
               <th className="num">Pedido Mínimo (R$)</th>
               <th onClick={() => toggleSort("estoque")} className="num vivo-th-sortable">Estoque R$ <SortIcon col="estoque" /></th>
@@ -2613,11 +2847,12 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
           <tbody>
             {filtered.map((r, i) => (
               <tr key={r.fornecedor} className={i % 2 === 0 ? "vivo-row-even" : "vivo-row-odd"}>
-                <td className="vivo-supplier-name vivo-supplier-name-link" onClick={() => setSelectedSupplier(r.fornecedor)} title="Clique para ver detalhes">{r.fornecedor}</td>
+                <td className="vivo-supplier-name vivo-supplier-name-link" style={{ width: 140, minWidth: 140, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} onClick={() => setSelectedSupplier(r.fornecedor)} title={r.fornecedor}>{r.fornecedor}</td>
                 <td>
-                  <select className="vivo-select-tag" style={r.tag ? { ...TAG_STYLES[r.tag], border: "none", borderRadius: 6, padding: "3px 8px" } : {}} value={r.tag} onChange={(e) => setTag(r.fornecedor, e.target.value)}>
-                    {TAG_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
+                  {r.tag
+                    ? <span style={{ ...TAG_STYLES[r.tag], padding: "2px 10px", borderRadius: 100, fontSize: 11 }}>{TAG_LABELS[r.tag]}</span>
+                    : <span style={{ color: "var(--ink-soft)", fontSize: 11 }}>—</span>
+                  }
                 </td>
                 <td className="num vivo-td-custom">
                   <input type="number" min="1" className="vivo-input-mini" placeholder="—" value={r.customDays} onChange={(e) => setCustomDays(r.fornecedor, e.target.value)} />
