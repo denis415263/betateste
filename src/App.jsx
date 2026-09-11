@@ -591,51 +591,52 @@ function TopNav({ mainTab, subTab, goTo, monitoredCount }) {
   const activeMain = NAV_STRUCTURE.find((m) => m.id === mainTab);
 
   return (
-    <header className="vivo-topnav">
-      <div className="vivo-topnav-row vivo-topnav-main">
-        <div className="vivo-brand">
-          <span className="vivo-brand-mark">●</span>
-          <div>
-            <div className="vivo-brand-name">Vívora</div>
-            <div className="vivo-brand-sub">Compras &amp; Estoque</div>
-          </div>
+    <aside className="vivo-sidebar">
+      {/* Brand */}
+      <div className="vivo-sidebar-brand">
+        <span className="vivo-brand-mark">●</span>
+        <div>
+          <div className="vivo-brand-name">Vívora</div>
+          <div className="vivo-brand-sub">Compras &amp; Estoque</div>
         </div>
-        <nav className="vivo-main-tabs">
-          {NAV_STRUCTURE.map((m) => (
+      </div>
+
+      {/* Itens de navegação */}
+      <nav className="vivo-sidebar-nav">
+        {NAV_STRUCTURE.map((m) => (
+          <div key={m.id} className="vivo-sidebar-group">
             <button
-              key={m.id}
-              className={"vivo-main-tab-btn" + (mainTab === m.id ? " is-active" : "")}
+              className={"vivo-sidebar-main-btn" + (mainTab === m.id ? " is-active" : "")}
               onClick={() => goTo(m.id, m.subItems[0].id)}
             >
               <m.icon size={16} strokeWidth={2} />
               <span>{m.label}</span>
             </button>
-          ))}
-        </nav>
-        <div className="vivo-topnav-spacer" />
-        <span className="vivo-topnav-hint">v{APP_VERSION} • custo líquido ativo</span>
-      </div>
+            {mainTab === m.id && (
+              <div className="vivo-sidebar-sub">
+                {m.subItems.map((s) => {
+                  const count = countFor(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      className={"vivo-sidebar-sub-btn" + (subTab === s.id ? " is-active" : "")}
+                      onClick={() => goTo(m.id, s.id)}
+                    >
+                      {s.label}
+                      {typeof count === "number" && count > 0 && (
+                        <span className="vivo-sub-tab-count">{count}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </nav>
 
-      {activeMain && (
-        <div className="vivo-topnav-row vivo-sub-tabs">
-          {activeMain.subItems.map((s) => {
-            const count = countFor(s.id);
-            return (
-              <button
-                key={s.id}
-                className={"vivo-sub-tab-btn" + (subTab === s.id ? " is-active" : "")}
-                onClick={() => goTo(mainTab, s.id)}
-              >
-                {s.label}
-                {typeof count === "number" && count > 0 && (
-                  <span className="vivo-sub-tab-count">{count}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </header>
+      <div className="vivo-sidebar-footer">v{APP_VERSION}</div>
+    </aside>
   );
 }
 
@@ -906,7 +907,7 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
       const v30 = m.vendas[30];
       const v90 = m.vendas[90];
       const v180 = m.vendas[180];
-      const salesSnapshot = { ts: now, vendas30: v30, vendas90: v90, vendas180: v180, estoque: m.estoque, precoCusto: m.precoCusto };
+      const salesSnapshot = { ts: now, vendas30: v30, vendas90: v90, vendas180: v180, estoque: m.estoque, precoCusto: m.precoCusto, custoLiquido: existing?.custoLiquido ?? undefined };
 
       if (existing) {
         updatedCount++;
@@ -1282,9 +1283,10 @@ function buildTotalStockSeries(products, supplierFilter, days = 90) {
   const productList = Object.values(products).filter((p) => !p.inactive && (supplierFilter === "all" || p.fornecedor === supplierFilter));
   const byDay = {};
   for (const p of productList) {
-    const custo = custoLiq(p);
     for (const snap of (p.salesHistory || [])) {
       if (snap.ts < cutoff) continue;
+      // Usa custo do snapshot se disponível, senão usa o custo atual (fallback)
+      const custo = snap.custoLiquido || snap.precoCusto || custoLiq(p);
       const dk = dayKey(snap.ts);
       if (!byDay[dk]) byDay[dk] = { ts: snap.ts, items: {} };
       if (!byDay[dk].items[p.codigo] || snap.ts > byDay[dk].items[p.codigo].ts) {
@@ -1304,9 +1306,9 @@ function buildExcessStockSeries(products, supplierFilter, thresholdDays = 90, da
   const productList = Object.values(products).filter((p) => !p.inactive && (supplierFilter === "all" || p.fornecedor === supplierFilter));
   const byDay = {};
   for (const p of productList) {
-    const custo = custoLiq(p);
     for (const snap of (p.salesHistory || [])) {
       if (snap.ts < cutoff) continue;
+      const custo = snap.custoLiquido || snap.precoCusto || custoLiq(p);
       const dk = dayKey(snap.ts);
       if (!byDay[dk]) byDay[dk] = { ts: snap.ts, items: {} };
       if (!byDay[dk].items[p.codigo] || snap.ts > byDay[dk].items[p.codigo].ts) {
@@ -2314,9 +2316,14 @@ function OverviewTab({ products, persistProducts, settings }) {
   const excessSeries    = useMemo(() => buildExcessStockSeries(products, "all", 90, 90), [products]);
   const totalStockSeries = useMemo(() => buildTotalStockSeries(products, "all", 90), [products]);
 
+  // KPIs calculados a partir dos dados atuais (mesma lógica da tabela)
   const totalCapital  = skus.reduce((acc, p) => acc + p.capitalExc, 0);
   const totalEstoque  = skus.reduce((acc, p) => acc + p.estoqueR, 0);
   const pctExcesso    = totalEstoque > 0 ? (totalCapital / totalEstoque) * 100 : 0;
+
+  // Nota: o gráfico pode diferir levemente do KPI porque usa snapshots históricos
+  // (custoLiq pode ter sido atualizado após a última importação).
+  // A meta é calculada sobre o estoque total histórico para consistência com o gráfico.
   const criticos      = skus.filter((p) => p.status === "critico").length;
   const emExcesso     = skus.filter((p) => p.status === "excesso").length;
 
@@ -2930,35 +2937,61 @@ const VIVO_CSS = `
   --ink: #2b2620; --ink-soft: #6b6358; --paper: #faf7f0; --card: #ffffff;
   --line: #e6ddc9; --olive: #5b6b4f; --olive-dark: #41503a;
   --amber: #c1762f; --amber-soft: #f3e3cf; --rust: #a8472f; --rust-soft: #f7e4dd;
-  --sidebar-bg: #232017; --sidebar-line: #38332a;
-  display: flex; flex-direction: column; min-height: 100%; width: 100%;
+  --sidebar-bg: #232017; --sidebar-line: #38332a; --sidebar-w: 200px;
+  display: flex; flex-direction: row; min-height: 100%; width: 100%;
   background: var(--paper); color: var(--ink);
   font-family: 'Inter', -apple-system, sans-serif; font-size: 13px; line-height: 1.4;
 }
 .vivo-root * { box-sizing: border-box; }
+
+/* Sidebar */
+.vivo-sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  background: var(--sidebar-bg); color: #e9e3d6;
+  display: flex; flex-direction: column;
+  position: fixed; top: 0; left: 0; bottom: 0;
+  z-index: 50; overflow-y: auto;
+}
+.vivo-sidebar-brand {
+  display: flex; align-items: center; gap: 9px;
+  padding: 20px 16px 16px;
+  border-bottom: 1px solid var(--sidebar-line);
+}
+.vivo-sidebar-nav { flex: 1; padding: 10px 0; }
+.vivo-sidebar-group { display: flex; flex-direction: column; }
+.vivo-sidebar-main-btn {
+  display: flex; align-items: center; gap: 9px;
+  background: transparent; border: none; color: #b3ab97;
+  padding: 10px 16px; width: 100%; text-align: left;
+  font-size: 13px; font-weight: 500; font-family: inherit;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.vivo-sidebar-main-btn:hover { background: #2e2a20; color: #fbf8f0; }
+.vivo-sidebar-main-btn.is-active { color: #fff; background: #2e2a20; }
+.vivo-sidebar-sub { display: flex; flex-direction: column; padding: 2px 0 6px; }
+.vivo-sidebar-sub-btn {
+  display: flex; align-items: center; gap: 7px;
+  background: transparent; border: none; color: #8a8272;
+  padding: 7px 16px 7px 36px; width: 100%; text-align: left;
+  font-size: 12.5px; font-family: inherit; cursor: pointer;
+  transition: background 0.12s, color 0.12s; border-left: 2px solid transparent;
+}
+.vivo-sidebar-sub-btn:hover { color: #e9e3d6; background: #2a2720; }
+.vivo-sidebar-sub-btn.is-active { color: #fff; border-left-color: var(--amber); background: #2a2720; }
+.vivo-sidebar-footer {
+  padding: 12px 16px; font-size: 11px; color: #4a4540;
+  border-top: 1px solid var(--sidebar-line);
+}
+
+/* Conteúdo principal — margem esquerda igual à largura da sidebar */
+.vivo-main { flex: 1; min-width: 0; overflow-x: auto; margin-left: var(--sidebar-w); }
 .vivo-loading { align-items: center; justify-content: center; flex-direction: column; gap: 10px; width: 100%; min-height: 480px; }
 .vivo-loading-mark { font-family: 'Fraunces', serif; font-size: 28px; letter-spacing: 0.08em; color: var(--olive-dark); }
 .vivo-loading-text { color: var(--ink-soft); font-size: 13px; }
-.vivo-topnav { background: var(--sidebar-bg); color: #e9e3d6; flex-shrink: 0; }
-.vivo-topnav-row { display: flex; align-items: center; gap: 4px; padding: 0 28px; }
-.vivo-topnav-main { height: 60px; border-bottom: 1px solid var(--sidebar-line); }
-.vivo-brand { display: flex; align-items: center; gap: 9px; margin-right: 28px; }
 .vivo-brand-mark { color: var(--amber); font-size: 16px; }
 .vivo-brand-name { font-family: 'Fraunces', serif; font-size: 16px; font-weight: 600; letter-spacing: 0.01em; color: #fbf8f0; line-height: 1.1; }
 .vivo-brand-sub { font-size: 10.5px; color: #a39c8a; margin-top: 1px; }
-.vivo-main-tabs { display: flex; align-items: center; gap: 4px; height: 100%; }
-.vivo-main-tab-btn { display: flex; align-items: center; gap: 8px; background: transparent; border: none; color: #c8c0ac; padding: 0 16px; height: 100%; font-size: 13.5px; font-weight: 500; font-family: inherit; cursor: pointer; position: relative; transition: color 0.15s; }
-.vivo-main-tab-btn:hover { color: #fbf8f0; }
-.vivo-main-tab-btn.is-active { color: #fff; }
-.vivo-main-tab-btn.is-active::after { content: ""; position: absolute; left: 16px; right: 16px; bottom: 0; height: 2px; background: var(--amber); }
-.vivo-topnav-spacer { flex: 1; }
-.vivo-topnav-hint { font-size: 11.5px; color: #847d6c; white-space: nowrap; }
-.vivo-sub-tabs { height: 46px; gap: 6px; }
-.vivo-sub-tab-btn { display: flex; align-items: center; gap: 7px; background: transparent; border: none; color: #b3ab97; padding: 7px 13px; border-radius: 7px; font-size: 13px; font-family: inherit; cursor: pointer; transition: background 0.15s, color 0.15s; }
-.vivo-sub-tab-btn:hover { background: #2e2a20; color: #fbf8f0; }
-.vivo-sub-tab-btn.is-active { background: #383228; color: #fff; }
 .vivo-sub-tab-count { background: rgba(255,255,255,0.14); border-radius: 100px; font-size: 10.5px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace; }
-.vivo-main { flex: 1; min-width: 0; overflow-x: auto; }
 .vivo-page { padding: 30px 36px 50px; max-width: 1200px; }
 .vivo-page-head { margin-bottom: 22px; }
 .vivo-page-head h1 { font-family: 'Fraunces', serif; font-size: 26px; font-weight: 600; margin: 0 0 5px; color: var(--ink); }
