@@ -357,8 +357,8 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [generatedOrder, setGeneratedOrder] = useState(null);
   const [loaded, setLoaded] = useState(false);
-  const [mainTab, setMainTab] = useState("relatorios");
-  const [subTab, setSubTab] = useState("import");
+  const [mainTab, setMainTab] = useState("compras");
+  const [subTab, setSubTab]   = useState("overview");
   const [authed, setAuthed] = useState(true);
   const [migration, setMigration] = useState({ checked: false, available: false, running: false, done: false, error: null });
 
@@ -2108,7 +2108,8 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
   const W = 800, H = 140, PAD = { top: 16, right: 20, bottom: 32, left: 80 };
   const innerW = W - PAD.left - PAD.right, innerH = H - PAD.top - PAD.bottom;
   const values = series.map((s) => s.capital);
-  const minV = Math.min(...values), maxV = Math.max(...values), range = maxV - minV || 1;
+  const allValues = [...values];
+  const minV = Math.min(...allValues), maxV = Math.max(...allValues), range = maxV - minV || 1;
   const toX = (i) => PAD.left + (i / (series.length - 1)) * innerW;
   const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
   const points = series.map((s, i) => `${toX(i)},${toY(s.capital)}`).join(" ");
@@ -2144,9 +2145,24 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
     <div>
       <div className="vivo-minichart-header">
         <span className="vivo-capital-chart-label">{title}</span>
-        <span className="vivo-minichart-current" style={{ color }}>
-          {hover ? <><strong>{fmtCurrency(hover.value)}</strong>{hover.diff !== null && <span style={{ fontSize: 11, marginLeft: 8, color: hover.diff > 0 ? color : "var(--olive-dark)" }}>{hover.diff > 0 ? "+" : ""}{fmtCurrency(hover.diff)} vs anterior</span>}</> : <><strong>{fmtCurrency(last.capital)}</strong>{deltaPct && <span style={{ fontSize: 11, marginLeft: 8, color: delta >= 0 ? color : "var(--olive-dark)" }}>{delta >= 0 ? "+" : ""}{deltaPct}% no período</span>}</>}
-        </span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+          <span className="vivo-minichart-current" style={{ color }}>
+            {hover ? <><strong>{fmtCurrency(hover.value)}</strong>{hover.diff !== null && <span style={{ fontSize: 11, marginLeft: 8, color: hover.diff > 0 ? color : "var(--olive-dark)" }}>{hover.diff > 0 ? "+" : ""}{fmtCurrency(hover.diff)} vs anterior</span>}</> : <><strong>{fmtCurrency(last.capital)}</strong>{deltaPct && <span style={{ fontSize: 11, marginLeft: 8, color: delta >= 0 ? color : "var(--olive-dark)" }}>{delta >= 0 ? "+" : ""}{deltaPct}% no período</span>}</>}
+          </span>
+          {metaSeries && metaSeries.length > 0 && (() => {
+            const currentMeta = metaSeries[metaSeries.length - 1].capital;
+            const currentVal  = hover ? hover.value : last.capital;
+            const diff        = currentVal - currentMeta;
+            const acima       = diff > 0;
+            return (
+              <span style={{ fontSize: 11, color: acima ? "var(--rust)" : "var(--olive-dark)", fontFamily: "monospace" }}>
+                {acima
+                  ? `▲ ${fmtCurrency(diff)} acima da meta de 10%`
+                  : `▼ ${fmtCurrency(Math.abs(diff))} abaixo da meta de 10%`}
+              </span>
+            );
+          })()}
+        </div>
       </div>
       <div style={{ position: "relative" }}>
         <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="vivo-supplier-chart-svg" preserveAspectRatio="none" onMouseMove={handleMouseMove} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
@@ -2154,27 +2170,6 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
           {gridLines.map((g, gi) => (<g key={gi}><line x1={PAD.left} y1={g.y} x2={PAD.left + innerW} y2={g.y} stroke="var(--line)" strokeWidth="1" strokeDasharray="4,3" /><text x={PAD.left - 6} y={g.y + 4} fontSize="8.5" fill="var(--ink-soft)" textAnchor="end">{g.label}</text></g>))}
           <polygon points={areaPoints} fill={`url(#${gradId})`} />
           <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          {/* Linha de meta tracejada */}
-          {metaSeries && metaSeries.length >= 2 && (() => {
-            const metaPoints = metaSeries
-              .map((s, i) => {
-                const idx = series.findIndex((_, si) => Math.abs(series[si]?.ts - s.ts) < MS_PER_DAY / 2);
-                const x = idx >= 0 ? toX(idx) : PAD.left + (i / (metaSeries.length - 1)) * innerW;
-                return `${x},${toY(s.capital)}`;
-              })
-              .join(" ");
-            const lastMeta = metaSeries[metaSeries.length - 1];
-            const lastMetaX = toX(series.length - 1);
-            const lastMetaY = toY(lastMeta.capital);
-            return (
-              <g>
-                <polyline points={metaPoints} fill="none" stroke="var(--olive-dark)" strokeWidth="1.5" strokeDasharray="6,3" opacity="0.7" />
-                <text x={lastMetaX - 4} y={lastMetaY - 6} fontSize="9" fill="var(--olive-dark)" textAnchor="end" fontWeight="600">
-                  {metaLabel || "Meta"}
-                </text>
-              </g>
-            );
-          })()}
           {hover && <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
           <circle cx={hover ? hover.x : toX(series.length - 1)} cy={hover ? hover.y : toY(last.capital)} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
           {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.i)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
@@ -3038,7 +3033,7 @@ const VIVO_CSS = `
 .vivo-sort-btn { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; font-size: 10px; color: var(--ink-soft); padding: 1px 3px; border-radius: 3px; line-height: 1; margin-left: 2px; }
 .vivo-sort-btn:hover { background: var(--line); color: var(--ink); }
 .vivo-drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.15); z-index: 100; }
-.vivo-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 95vw); background: var(--paper); box-shadow: -4px 0 24px rgba(0,0,0,0.12); z-index: 101; display: flex; flex-direction: column; overflow: hidden; }
+.vivo-drawer { position: fixed; top: 0; left: 0; bottom: 0; width: min(520px, 95vw); background: var(--paper); box-shadow: 4px 0 24px rgba(0,0,0,0.12); z-index: 101; display: flex; flex-direction: column; overflow: hidden; }
 .vivo-drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); background: var(--card); }
 .vivo-drawer-title { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.3; }
 .vivo-drawer-sub { font-size: 11.5px; color: var(--ink-soft); margin-top: 3px; font-family: monospace; }
