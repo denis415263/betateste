@@ -3066,7 +3066,7 @@ const VIVO_CSS = `
 .vivo-sort-btn { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; font-size: 10px; color: var(--ink-soft); padding: 1px 3px; border-radius: 3px; line-height: 1; margin-left: 2px; }
 .vivo-sort-btn:hover { background: var(--line); color: var(--ink); }
 .vivo-drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.15); z-index: 100; }
-.vivo-drawer { position: fixed; top: 0; left: 0; bottom: 0; width: min(520px, 95vw); background: var(--paper); box-shadow: 4px 0 24px rgba(0,0,0,0.12); z-index: 101; display: flex; flex-direction: column; overflow: hidden; }
+.vivo-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 95vw); background: var(--paper); box-shadow: -4px 0 24px rgba(0,0,0,0.12); z-index: 101; display: flex; flex-direction: column; overflow: hidden; }
 .vivo-drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); background: var(--card); }
 .vivo-drawer-title { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.3; }
 .vivo-drawer-sub { font-size: 11.5px; color: var(--ink-soft); margin-top: 3px; font-family: monospace; }
