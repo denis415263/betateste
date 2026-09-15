@@ -76,6 +76,61 @@ function fmtDateShort(ts) {
 // Custo de nota (col K) — usado em pedidos de compra e geração de pedido
 function custoNota(p) { return p.precoCusto || 0; }
 
+// Tags de item — independentes da tag do fornecedor
+const ITEM_TAG_OPTIONS = [
+  { value: "",          label: "—" },
+  { value: "escalando", label: "Escalando" },
+  { value: "liquidacao",label: "Liquidação" },
+  { value: "inativo",   label: "Inativo" },
+];
+const ITEM_TAG_STYLES = {
+  escalando:  { background: "#e1ecd9", color: "#3c6b2a" },
+  liquidacao: { background: "var(--rust-soft)", color: "var(--rust)" },
+  inativo:    { background: "#e8e8e8", color: "#555" },
+};
+const ITEM_TAG_LABELS = { escalando: "Escalando", liquidacao: "Liquidação", inativo: "Inativo" };
+
+function ItemTagBadge({ tag }) {
+  if (!tag) return null;
+  return (
+    <span style={{ ...ITEM_TAG_STYLES[tag], padding: "1px 8px", borderRadius: 100, fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+      {ITEM_TAG_LABELS[tag]}
+    </span>
+  );
+}
+
+function ItemTagSelect({ product, products, persistProducts, disabled }) {
+  const tag = product.itemTag || "";
+  const canInactivate = !product.estoque || product.estoque === 0;
+
+  async function handleChange(e) {
+    const value = e.target.value;
+    if (value === "inativo" && !canInactivate) {
+      alert("Só é possível marcar como Inativo quando o estoque for zero.");
+      return;
+    }
+    const next = { ...products, [product.codigo]: { ...products[product.codigo], itemTag: value || null } };
+    await persistProducts(next);
+  }
+
+  return (
+    <select
+      className="vivo-select-tag"
+      style={tag ? { ...ITEM_TAG_STYLES[tag], border: "none", borderRadius: 6, padding: "3px 6px", fontSize: 11 } : { fontSize: 11 }}
+      value={tag}
+      onChange={handleChange}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {ITEM_TAG_OPTIONS.map((t) => (
+        <option key={t.value} value={t.value} disabled={t.value === "inativo" && !canInactivate}>
+          {t.label}{t.value === "inativo" && !canInactivate ? " (estoque > 0)" : ""}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+
 // Custo líquido (col S) — usado em relatórios financeiros, capital imobilizado, estoque R$
 function custoLiq(p) { return p.custoLiquido || p.precoCusto || 0; }
 
@@ -538,6 +593,7 @@ export default function App() {
             generatedOrder={generatedOrder}
             products={products}
             settings={settings}
+            persistProducts={persistProducts}
           />
         )}
         {mainTab === "performance" && subTab === "tendencias" && (
@@ -1158,7 +1214,7 @@ function ProductsTab({ products, persistProducts, settings }) {
           <thead>
             <tr>
               <th>Item</th>
-              <th>Fornecedor</th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">Código</th>
               <th className="num">Estoque</th>
               <th className="num">Custo Nota</th>
@@ -1170,7 +1226,7 @@ function ProductsTab({ products, persistProducts, settings }) {
             {pageItems.map((p) => (
               <tr key={p.codigo}>
                 <ItemCell name={p.item} />
-                <td>{p.fornecedor}</td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque)}</td>
                 <td className="num mono">{p.precoCusto ? fmtCurrency(p.precoCusto) : "—"}</td>
@@ -1245,7 +1301,7 @@ function PerformanceTab({ products }) {
           <thead>
             <tr>
               <th>Item</th>
-              <th>Fornecedor</th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">Código</th>
               <th className="num">Média /dia (atual)</th>
               <th className="num">Variação</th>
@@ -1256,7 +1312,7 @@ function PerformanceTab({ products }) {
             {pageItems.map((p) => (
               <tr key={p.codigo}>
                 <ItemCell name={p.item} />
-                <td>{p.fornecedor}</td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{p.trend.lastAvg !== null ? p.trend.lastAvg.toFixed(2) : "—"}</td>
                 <td className={"num mono" + (p.trend.deltaPct > 0 ? " vivo-trend-up" : p.trend.deltaPct < 0 ? " vivo-trend-down" : "")}>
@@ -1567,7 +1623,7 @@ function StockQualityTab({ products, persistProducts }) {
             <tr>
               <th></th>
               <th>Item</th>
-              <th>Fornecedor</th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">Código</th>
               <th className="num">Estoque</th>
               <th className="num">Vendas 30D</th>
@@ -1585,7 +1641,7 @@ function StockQualityTab({ products, persistProducts }) {
               <tr key={p.codigo} className={selected[p.codigo] ? "is-selected" : ""}>
                 <td><input type="checkbox" checked={!!selected[p.codigo]} onChange={() => toggleSelect(p.codigo)} /></td>
                 <ItemCell name={p.item} />
-                <td>{p.fornecedor}</td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
@@ -1700,7 +1756,7 @@ function MonitoredTab({ products, persistProducts }) {
             <tr>
               <th></th>
               <th>Item</th>
-              <th>Fornecedor</th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">Código</th>
               <th className="num">Estoque</th>
               <th>Desde</th>
@@ -1717,7 +1773,7 @@ function MonitoredTab({ products, persistProducts }) {
               <tr key={p.codigo} className={selected[p.codigo] ? "is-selected" : ""}>
                 <td><input type="checkbox" checked={!!selected[p.codigo]} onChange={() => toggleSelect(p.codigo)} /></td>
                 <ItemCell name={p.item} />
-                <td>{p.fornecedor}</td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque)}</td>
                 <td className="mono">{p.monitoringStartedAt ? fmtDateShort(p.monitoringStartedAt) : "—"}</td>
@@ -1758,7 +1814,7 @@ function MonitoringStatusBadge({ status, deltaPct }) {
 
 function calcSupplierPurchase(products, fornecedor, days) {
   return Object.values(products)
-    .filter((p) => !p.inactive && p.fornecedor === fornecedor)
+    .filter((p) => !p.inactive && p.itemTag !== "inativo" && p.fornecedor === fornecedor)
     .reduce((acc, p) => {
       const avgDay = (p.vendas30 || 0) / 30;
       const idealStock = avgDay * days;
@@ -1767,9 +1823,10 @@ function calcSupplierPurchase(products, fornecedor, days) {
     }, 0);
 }
 
-function GeneratedOrderTab({ generatedOrder, products, settings }) {
+function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts }) {
   const defaultDays = generatedOrder?.days || 30;
   const [skuDays, setSkuDays] = useState({});
+  const [drawerProduct, setDrawerProduct] = useState(null);
   useEffect(() => { setSkuDays({}); }, [generatedOrder]);
 
   if (!generatedOrder) return <div className="vivo-page"><EmptyState icon={ShoppingCart} title="Nenhum pedido gerado" text="Vá em Fornecedores, defina a cobertura e clique em Gerar Pedido." /></div>;
@@ -1778,7 +1835,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings }) {
 
   const items = useMemo(() => {
     return Object.values(products)
-      .filter((p) => !p.inactive && p.fornecedor === fornecedor)
+      .filter((p) => !p.inactive && p.itemTag !== "inativo" && p.fornecedor === fornecedor)
       .map((p) => {
         const days = skuDays[p.codigo] !== undefined ? skuDays[p.codigo] : defaultDays;
         const avgDay = (p.vendas30 || 0) / 30;
@@ -1830,7 +1887,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings }) {
           <thead>
             <tr>
               <th>Item</th>
-              <th>Fornecedor</th>
+              <th style={{ width: 80 }}>Tag</th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">SKU</th>
               <th className="num">Estoque</th>
               <th className="num">Vendas 30D</th>
@@ -1842,13 +1900,19 @@ function GeneratedOrderTab({ generatedOrder, products, settings }) {
           </thead>
           <tbody>
             {items.map((p) => (
-              <tr key={p.codigo} className={p.needed === 0 ? "vivo-row-zero" : ""}>
+              <tr
+                key={p.codigo}
+                className={p.needed === 0 ? "vivo-row-zero" : "" + (drawerProduct?.codigo === p.codigo ? " is-selected" : "")}
+                style={{ cursor: "pointer" }}
+                onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
+              >
                 <ItemCell name={p.item} />
-                <td>{p.fornecedor}</td>
+                <td style={{ width: 80 }} onClick={(e) => e.stopPropagation()}><ItemTagBadge tag={p.itemTag} /></td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
-                <td className="num">
+                <td className="num" onClick={(e) => e.stopPropagation()}>
                   <input type="number" min="1" className={"vivo-input-mini" + (skuDays[p.codigo] !== undefined ? " vivo-sku-days-custom" : "")} value={p.days} onChange={(e) => setDaysForSku(p.codigo, e.target.value)} />
                 </td>
                 <td className="num mono">{p.needed > 0 ? fmtNumber(Math.ceil(p.needed)) : "—"}</td>
@@ -1859,6 +1923,15 @@ function GeneratedOrderTab({ generatedOrder, products, settings }) {
           </tbody>
         </table>
       </div>
+
+      {drawerProduct && (
+        <SkuDrawer
+          product={drawerProduct}
+          products={products}
+          persistProducts={persistProducts}
+          onClose={() => setDrawerProduct(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1904,7 +1977,10 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
       <div className="vivo-drawer">
         <div className="vivo-drawer-header">
           <div>
-            <div className="vivo-drawer-title">{product.item}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <div className="vivo-drawer-title">{product.item}</div>
+              {currentProduct.itemTag && <ItemTagBadge tag={currentProduct.itemTag} />}
+            </div>
             <div className="vivo-drawer-sub">{product.codigo} · {product.fornecedor}</div>
           </div>
           <button className="vivo-drawer-close" onClick={onClose}>✕</button>
@@ -1956,6 +2032,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState("desc");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [itemTagFilter, setItemTagFilter] = useState("all");
   const [itemColWidth, setItemColWidth] = useState(220);
   const [drawerProduct, setDrawerProduct] = useState(null);
 
@@ -1994,7 +2071,11 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
     [products, fornecedor]);
 
   const skusSorted = useMemo(() => {
-    let list = statusFilter === "all" ? skus : skus.filter((p) => p.status === statusFilter);
+    let list = skus;
+    // Inativos ocultos por padrão — só aparecem quando filtro "inativo" ativo
+    if (itemTagFilter !== "inativo") list = list.filter((p) => p.itemTag !== "inativo");
+    if (itemTagFilter !== "all") list = list.filter((p) => (p.itemTag || "") === itemTagFilter);
+    if (statusFilter !== "all") list = list.filter((p) => p.status === statusFilter);
     if (sortCol) {
       list = [...list].sort((a, b) => {
         const va = a[sortCol] ?? -Infinity;
@@ -2003,7 +2084,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
       });
     }
     return list;
-  }, [skus, statusFilter, sortCol, sortDir]);
+  }, [skus, statusFilter, itemTagFilter, sortCol, sortDir]);
 
   const estoqueTotal = skus.reduce((acc, p) => acc + (p.estoque || 0) * custoLiq(p), 0);
   const capitalExcesso = skus.filter((p) => p.quality.isExcess).reduce((acc, p) => acc + p.quality.capitalImobilizado, 0);
@@ -2073,6 +2154,17 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
             <span style={{ color: "var(--ink-soft)", fontFamily: "monospace" }}>{itemColWidth}px</span>
           </div>
           <div className="vivo-supplier-tag-chips">
+            <span className="vivo-supplier-tag-label">Tag item:</span>
+            {["all","escalando","liquidacao","inativo"].map((t) => (
+              <button key={t}
+                className={"vivo-supplier-tag-chip" + (itemTagFilter === t ? (t === "escalando" ? " vivo-stag-escalando is-active" : t === "liquidacao" ? " vivo-stag-liquidacao is-active" : t === "inativo" ? " vivo-stag-inativo is-active" : " is-active-neutral") : "")}
+                onClick={() => setItemTagFilter(t)}
+              >
+                {t === "all" ? "Todas" : ITEM_TAG_LABELS[t]}
+              </button>
+            ))}
+          </div>
+          <div className="vivo-supplier-tag-chips">
             <span className="vivo-supplier-tag-label">Situação:</span>
             {["all","ok","critico","excesso"].map((s) => (
               <button key={s} className={"vivo-supplier-tag-chip" + (statusFilter === s ? (s === "ok" ? " vivo-stag-escalando is-active" : s !== "all" ? " vivo-stag-liquidacao is-active" : " is-active-neutral") : "")} onClick={() => setStatusFilter(s)}>
@@ -2087,6 +2179,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
             <thead>
               <tr>
                 <th style={{ width: itemColWidth, minWidth: itemColWidth, maxWidth: itemColWidth }}>Item</th>
+                <th>Tag</th>
                 <th className="mono">SKU</th>
                 <th className="num">Estoque <SortBtn col="estoque" /></th>
                 <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
@@ -2101,6 +2194,9 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
               {skusSorted.map((p) => (
                 <tr key={p.codigo} className={drawerProduct?.codigo === p.codigo ? "is-selected" : ""} style={{ cursor: "pointer" }} onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}>
                   <td style={{ width: itemColWidth, minWidth: itemColWidth, maxWidth: itemColWidth, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }} title={p.item}>{p.item}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <ItemTagSelect product={p} products={products} persistProducts={persistProducts} />
+                  </td>
                   <td className="mono">{p.codigo}</td>
                   <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                   <td className="num mono">{p.vendas30 ?? "—"}</td>
@@ -2115,7 +2211,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                   </td>
                 </tr>
               ))}
-              {skusSorted.length === 0 && <tr><td colSpan={9} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
+              {skusSorted.length === 0 && <tr><td colSpan={10} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2391,12 +2487,14 @@ function OverviewTab({ products, persistProducts, settings }) {
   }, [products]);
 
   const skusSorted = useMemo(() => {
-    return [...skus].sort((a, b) => {
-      const va = a[sortCol] ?? -Infinity;
-      const vb = b[sortCol] ?? -Infinity;
-      if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
-      return sortDir === "desc" ? vb - va : va - vb;
-    });
+    return [...skus]
+      .filter((p) => p.itemTag !== "inativo") // inativos ocultos por padrão na visão geral
+      .sort((a, b) => {
+        const va = a[sortCol] ?? -Infinity;
+        const vb = b[sortCol] ?? -Infinity;
+        if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
+        return sortDir === "desc" ? vb - va : va - vb;
+      });
   }, [skus, sortCol, sortDir]);
 
   const { page, setPage, totalPages, pageItems, totalCount } = usePagination(skusSorted);
@@ -2489,6 +2587,7 @@ function OverviewTab({ products, persistProducts, settings }) {
           <thead>
             <tr>
               <th>Item</th>
+              <th>Tag</th>
               <th>Fornecedor <SortBtn col="fornecedor" /></th>
               <th className="mono">SKU</th>
               <th className="num">Estoque <SortBtn col="estoque" /></th>
@@ -2509,7 +2608,10 @@ function OverviewTab({ products, persistProducts, settings }) {
                 onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
               >
                 <td className="vivo-item-cell" title={p.item}>{p.item}</td>
-                <td>{p.fornecedor}</td>
+                <td style={{ width: 80, minWidth: 80 }}>
+                  <ItemTagBadge tag={p.itemTag} />
+                </td>
+                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
@@ -2531,7 +2633,7 @@ function OverviewTab({ products, persistProducts, settings }) {
               </tr>
             ))}
             {pageItems.length === 0 && (
-              <tr><td colSpan={10} className="vivo-table-empty">Nenhum produto importado.</td></tr>
+              <tr><td colSpan={11} className="vivo-table-empty">Nenhum produto importado.</td></tr>
             )}
           </tbody>
         </table>
@@ -2606,6 +2708,8 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
 
   const filtered = useMemo(() => {
     let out = rows;
+    // Inativos ocultos por padrão — só aparecem quando filtro "inativo" ativo
+    if (tagFilter !== "inativo") out = out.filter((r) => r.tag !== "inativo");
     if (tagFilter !== "all") {
       if (tagFilter === "") out = out.filter((r) => !r.tag);
       else out = out.filter((r) => r.tag === tagFilter);
@@ -2650,7 +2754,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
         <table className="vivo-table vivo-table-compact">
           <thead>
             <tr>
-              <th>Fornecedor <SortBtn col="fornecedor" /></th>
+              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor <SortBtn col="fornecedor" /></th>
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. R$ <SortBtn col="capitalExc" /></th>
               <th className="num">% Cap. Exc. <SortBtn col="pct" /></th>
@@ -2660,7 +2764,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
           <tbody>
             {filtered.map((r) => (
               <tr key={r.fornecedor} style={{ cursor: "pointer" }} onClick={() => onSelectSupplier(r.fornecedor)}>
-                <td className="vivo-supplier-name-link">{r.fornecedor}</td>
+                <td className="vivo-supplier-name-link vivo-td-supplier" title={r.fornecedor}>{r.fornecedor}</td>
                 <td className="num mono">{fmtCurrency(r.estoqueR)}</td>
                 <td className={"num mono" + (r.capitalExc > 0 ? " vivo-below-min" : "")}>{fmtCurrency(r.capitalExc)}</td>
                 <td className={"num mono" + (r.pct > 10 ? " vivo-below-min" : r.pct > 5 ? " vivo-kpi-warn" : r.pct > 0 ? " vivo-above-min" : "")}>
@@ -3074,13 +3178,13 @@ function CleanupTab({ products, persistProducts, history, settings, orders, pers
           </div>
           <div className="vivo-table-wrap vivo-card">
             <table className="vivo-table vivo-table-compact">
-              <thead><tr><th></th><th>Item</th><th>Fornecedor</th><th className="mono">Código</th><th className="num">Estoque</th><th>Última atualização</th></tr></thead>
+              <thead><tr><th></th><th>Item</th><th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th><th className="mono">Código</th><th className="num">Estoque</th><th>Última atualização</th></tr></thead>
               <tbody>
                 {pageItems.map((p) => (
                   <tr key={p.codigo} className={selected[p.codigo] ? "is-selected" : ""}>
                     <td><input type="checkbox" checked={!!selected[p.codigo]} onChange={() => toggleSelect(p.codigo)} /></td>
                     <ItemCell name={p.item} />
-                    <td>{p.fornecedor}</td><td className="mono">{p.codigo}</td>
+                    <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td><td className="mono">{p.codigo}</td>
                     <td className="num mono">{fmtNumber(p.estoque)}</td><td className="mono">{fmtDate(p.lastUpdated)}</td>
                   </tr>
                 ))}
@@ -3098,11 +3202,11 @@ function CleanupTab({ products, persistProducts, history, settings, orders, pers
         {showInactive && inactiveList.length > 0 && (
           <div className="vivo-table-wrap vivo-card" style={{ marginTop: 12 }}>
             <table className="vivo-table vivo-table-compact">
-              <thead><tr><th>Item</th><th>Fornecedor</th><th className="mono">Código</th><th>Inativado em</th><th></th></tr></thead>
+              <thead><tr><th>Item</th><th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th><th className="mono">Código</th><th>Inativado em</th><th></th></tr></thead>
               <tbody>
                 {inactiveList.map((p) => (
                   <tr key={p.codigo}>
-                    <ItemCell name={p.item} /><td>{p.fornecedor}</td><td className="mono">{p.codigo}</td>
+                    <ItemCell name={p.item} /><td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td><td className="mono">{p.codigo}</td>
                     <td className="mono">{p.inactivatedAt ? fmtDate(p.inactivatedAt) : "—"}</td>
                     <td><button className="vivo-toggle-btn" onClick={() => reactivate(p.codigo)}>Reativar</button></td>
                   </tr>
@@ -3279,6 +3383,7 @@ const VIVO_CSS = `
 .vivo-detail-back:hover { color: var(--olive-dark); }
 .vivo-supplier-name-link { cursor: pointer; color: var(--olive-dark) !important; text-decoration: underline; text-underline-offset: 3px; }
 .vivo-supplier-name-link:hover { color: var(--amber) !important; }
+.vivo-td-supplier { width: 110px; min-width: 110px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vivo-supplier-kpis { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
 .vivo-kpi-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
 .vivo-kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-soft); font-weight: 600; }
