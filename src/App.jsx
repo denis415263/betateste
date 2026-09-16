@@ -731,15 +731,18 @@ function PriceTableTab({ products, persistProducts }) {
       const priceMap = {};
       for (let i = 2; i < rows.length; i++) {
         const row = rows[i];
-        const sku = row[2] !== null && row[2] !== undefined ? String(row[2]).trim() : null;
-        const costK = row[10];
-        const costS = row[18];
+        const sku   = row[2] !== null && row[2] !== undefined ? String(row[2]).trim() : null;
+        const costK  = row[10];
+        const costS  = row[18];
+        const codFab = row[1];
         if (!sku) continue;
         priceMap[sku] = {};
         if (costK !== null && costK !== undefined && !isNaN(Number(costK)))
-          priceMap[sku].precoCusto = Math.round(Number(costK) * 10000) / 10000;
+          priceMap[sku].precoCusto    = Math.round(Number(costK) * 10000) / 10000;
         if (costS !== null && costS !== undefined && !isNaN(Number(costS)))
-          priceMap[sku].custoLiquido = Math.round(Number(costS) * 10000) / 10000;
+          priceMap[sku].custoLiquido  = Math.round(Number(costS) * 10000) / 10000;
+        if (codFab !== null && codFab !== undefined && String(codFab).trim())
+          priceMap[sku].codFabricante = String(codFab).trim();
       }
 
       const totalTabela = Object.keys(priceMap).length;
@@ -1003,7 +1006,12 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
           vendas90: v90 !== undefined ? v90 : existing.vendas90,
           vendas180: v180 !== undefined ? v180 : existing.vendas180,
           lastUpdated: now,
-          salesHistory: [...(existing.salesHistory || []), salesSnapshot],
+          // Substitui snapshot do mesmo dia se já existir, evitando duplicatas
+          salesHistory: (() => {
+            const todayKey = dayKey(now);
+            const prev = (existing.salesHistory || []).filter((s) => dayKey(s.ts) !== todayKey);
+            return [...prev, salesSnapshot];
+          })(),
         };
       } else {
         newCount++;
@@ -1853,14 +1861,21 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
 
   function exportToExcel() {
     const rows = items.map((p) => ({
-      "Item": p.item, "Fornecedor": p.fornecedor, "SKU": p.codigo,
-      "Estoque": p.estoque || 0, "Vendas 30D": p.vendas30 ?? 0,
-      "Cobertura (dias)": p.days, "Qtd. Necessária": p.needed > 0 ? Math.ceil(p.needed) : 0,
-      "Custo de Nota (R$)": custoNota(p), "Valor Compra (R$)": Number(p.valorCompra.toFixed(2)),
+      "Cód Fabricante":   p.codFabricante || "",
+      "Item":             p.item,
+      "Fornecedor":       p.fornecedor,
+      "SKU":              p.codigo,
+      "Qtd. Necessária":  p.needed > 0 ? Math.ceil(p.needed) : 0,
+      "Custo de Nota (R$)": custoNota(p),
+      "Valor Compra (R$)":  Number(p.valorCompra.toFixed(2)),
     }));
-    rows.push({ "Item": "TOTAL", "Fornecedor": fornecedor, "SKU": "", "Estoque": "", "Vendas 30D": "", "Cobertura (dias)": "", "Qtd. Necessária": "", "Custo de Nota (R$)": "", "Valor Compra (R$)": Number(totalPedido.toFixed(2)) });
+    rows.push({
+      "Cód Fabricante": "", "Item": "TOTAL", "Fornecedor": fornecedor, "SKU": "",
+      "Qtd. Necessária": "",
+      "Custo de Nota (R$)": "", "Valor Compra (R$)": Number(totalPedido.toFixed(2)),
+    });
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 40 }, { wch: 20 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 18 }];
+    ws["!cols"] = [{ wch: 16 }, { wch: 40 }, { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 18 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Pedido");
     XLSX.writeFile(wb, `pedido-${fornecedor.toLowerCase().replace(/\s+/g, "-")}-${new Date().toISOString().slice(0, 10)}.xlsx`);
