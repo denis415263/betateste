@@ -76,6 +76,17 @@ function fmtDateShort(ts) {
 // Custo de nota (col K) — usado em pedidos de compra e geração de pedido
 function custoNota(p) { return p.precoCusto || 0; }
 
+// Arredonda quantidade para o múltiplo mais próximo de cxMaster
+// Acima ou igual à metade → sobe; abaixo → desce. Mínimo = cxMaster.
+function roundToCx(qty, cxMaster) {
+  if (!cxMaster || cxMaster <= 0) return Math.ceil(qty);
+  if (qty <= 0) return 0;
+  const lower = Math.floor(qty / cxMaster) * cxMaster;
+  const upper = lower + cxMaster;
+  const mid   = lower + cxMaster / 2;
+  return qty >= mid ? upper : Math.max(lower, cxMaster);
+}
+
 // Tags de item — independentes da tag do fornecedor
 const ITEM_TAG_OPTIONS = [
   { value: "",          label: "—" },
@@ -1833,9 +1844,15 @@ function calcSupplierPurchase(products, fornecedor, days) {
 
 function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts }) {
   const defaultDays = generatedOrder?.days || 30;
-  const [skuDays, setSkuDays] = useState({});
+  const [skuDays, setSkuDays]   = useState({});
   const [drawerProduct, setDrawerProduct] = useState(null);
   useEffect(() => { setSkuDays({}); }, [generatedOrder]);
+
+  async function saveCxMaster(codigo, value) {
+    const val = value === "" ? null : Math.max(1, Number(value) || 1);
+    const next = { ...products, [codigo]: { ...products[codigo], cxMaster: val } };
+    await persistProducts(next);
+  }
 
   if (!generatedOrder) return <div className="vivo-page"><EmptyState icon={ShoppingCart} title="Nenhum pedido gerado" text="Vá em Fornecedores, defina a cobertura e clique em Gerar Pedido." /></div>;
 
@@ -1845,11 +1862,12 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
     return Object.values(products)
       .filter((p) => !p.inactive && p.itemTag !== "inativo" && p.fornecedor === fornecedor)
       .map((p) => {
-        const days = skuDays[p.codigo] !== undefined ? skuDays[p.codigo] : defaultDays;
-        const avgDay = (p.vendas30 || 0) / 30;
-        const needed = Math.max(0, avgDay * days - (p.estoque || 0));
+        const days    = skuDays[p.codigo] !== undefined ? skuDays[p.codigo] : defaultDays;
+        const avgDay  = (p.vendas30 || 0) / 30;
+        const rawNeeded = Math.max(0, avgDay * days - (p.estoque || 0));
+        const needed  = p.cxMaster ? roundToCx(rawNeeded, p.cxMaster) : (rawNeeded > 0 ? Math.ceil(rawNeeded) : 0);
         const valorCompra = needed * custoNota(p);
-        return { ...p, days, avgDay, needed, valorCompra };
+        return { ...p, days, avgDay, rawNeeded, needed, valorCompra };
       })
       .sort((a, b) => b.valorCompra - a.valorCompra);
   }, [products, fornecedor, defaultDays, skuDays]);
@@ -1861,21 +1879,22 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
 
   function exportToExcel() {
     const rows = items.map((p) => ({
-      "Cód Fabricante":   p.codFabricante || "",
-      "Item":             p.item,
-      "Fornecedor":       p.fornecedor,
-      "SKU":              p.codigo,
-      "Qtd. Necessária":  p.needed > 0 ? Math.ceil(p.needed) : 0,
+      "Cód Fabricante":    p.codFabricante || "",
+      "Item":              p.item,
+      "Fornecedor":        p.fornecedor,
+      "SKU":               p.codigo,
+      "Unidades":   p.needed > 0 ? p.needed : 0,
+      "Qt Caixas":         (p.cxMaster && p.needed > 0) ? p.needed / p.cxMaster : "",
       "Custo de Nota (R$)": custoNota(p),
       "Valor Compra (R$)":  Number(p.valorCompra.toFixed(2)),
     }));
     rows.push({
       "Cód Fabricante": "", "Item": "TOTAL", "Fornecedor": fornecedor, "SKU": "",
-      "Qtd. Necessária": "",
+      "Unidades": "", "Qt Caixas": "",
       "Custo de Nota (R$)": "", "Valor Compra (R$)": Number(totalPedido.toFixed(2)),
     });
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 16 }, { wch: 40 }, { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 18 }];
+    ws["!cols"] = [{ wch: 16 }, { wch: 40 }, { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 18 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Pedido");
     XLSX.writeFile(wb, `pedido-${fornecedor.toLowerCase().replace(/\s+/g, "-")}-${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -1905,6 +1924,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
               <th style={{ width: 80 }}>Tag</th>
               <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
               <th className="mono">SKU</th>
+              <th className="num">Cx Master</th>
               <th className="num">Estoque</th>
               <th className="num">Vendas 30D</th>
               <th className="num">Cobertura (dias)</th>
@@ -1917,7 +1937,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
             {items.map((p) => (
               <tr
                 key={p.codigo}
-                className={p.needed === 0 ? "vivo-row-zero" : "" + (drawerProduct?.codigo === p.codigo ? " is-selected" : "")}
+                className={(p.needed === 0 ? "vivo-row-zero" : "") + (drawerProduct?.codigo === p.codigo ? " is-selected" : "")}
                 style={{ cursor: "pointer" }}
                 onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
               >
@@ -1925,12 +1945,26 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
                 <td style={{ width: 80 }} onClick={(e) => e.stopPropagation()}><ItemTagBadge tag={p.itemTag} /></td>
                 <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
                 <td className="mono">{p.codigo}</td>
+                <td className="num" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="number" min="1"
+                    className={"vivo-input-mini" + (p.cxMaster ? " vivo-sku-days-custom" : "")}
+                    placeholder="—"
+                    value={p.cxMaster || ""}
+                    onChange={(e) => saveCxMaster(p.codigo, e.target.value)}
+                    style={{ width: 54 }}
+                  />
+                </td>
                 <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
                 <td className="num" onClick={(e) => e.stopPropagation()}>
                   <input type="number" min="1" className={"vivo-input-mini" + (skuDays[p.codigo] !== undefined ? " vivo-sku-days-custom" : "")} value={p.days} onChange={(e) => setDaysForSku(p.codigo, e.target.value)} />
                 </td>
-                <td className="num mono">{p.needed > 0 ? fmtNumber(Math.ceil(p.needed)) : "—"}</td>
+                <td className="num mono">
+                  {p.needed > 0
+                    ? <span title={p.cxMaster ? `Calculado: ${Math.ceil(p.rawNeeded)} un — arredondado para múltiplo de ${p.cxMaster}` : ""}>{fmtNumber(p.needed)}</span>
+                    : "—"}
+                </td>
                 <td className="num mono">{custoNota(p) ? fmtCurrency(custoNota(p)) : "—"}</td>
                 <td className={"num mono" + (p.valorCompra > 0 ? " vivo-value-positive" : "")}>{fmtCurrency(p.valorCompra)}</td>
               </tr>
