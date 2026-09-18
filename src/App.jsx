@@ -2202,7 +2202,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
-    else { setSortCol(col); setSortDir("desc"); }
+    else { setSortCol(col); setSortDir(col === "venceEm" ? "asc" : "desc"); }
   }
 
   function SortBtn({ col }) {
@@ -2222,7 +2222,8 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
         const avgDay = (p.vendas30 || 0) / 30;
         const coverageDays = avgDay > 0 ? Math.floor((p.estoque || 0) / avgDay) : null;
         const status = q.isExcess ? "excesso" : avgDay > 0 && coverageDays !== null && coverageDays < 15 ? "critico" : "ok";
-        return { ...p, quality: q, avgDay, coverageDays, status, estoqueR: (p.estoque || 0) * custoLiq(p), capitalExc: q.isExcess ? q.capitalImobilizado : 0 };
+        const vs = getValidadeStatus(p);
+        return { ...p, quality: q, avgDay, coverageDays, status, estoqueR: (p.estoque || 0) * custoLiq(p), capitalExc: q.isExcess ? q.capitalImobilizado : 0, venceEm: vs.status === "semDados" ? null : vs.diasRestantes };
       })
       .sort((a, b) => (b.vendas30 || 0) - (a.vendas30 || 0)),
     [products, fornecedor]);
@@ -2235,6 +2236,14 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
     if (statusFilter !== "all") list = list.filter((p) => p.status === statusFilter);
     if (sortCol) {
       list = [...list].sort((a, b) => {
+        // "Vence em": itens sem validade cadastrada ficam sempre no fim
+        if (sortCol === "venceEm") {
+          const na = a.venceEm === null || a.venceEm === undefined;
+          const nb = b.venceEm === null || b.venceEm === undefined;
+          if (na && nb) return 0;
+          if (na) return 1;
+          if (nb) return -1;
+        }
         const va = a[sortCol] ?? -Infinity;
         const vb = b[sortCol] ?? -Infinity;
         return sortDir === "desc" ? vb - va : va - vb;
@@ -2346,6 +2355,9 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                 <th style={{ width: itemColWidth, minWidth: itemColWidth, maxWidth: itemColWidth }}>Item</th>
                 <th>Tag</th>
                 <th className="mono">SKU</th>
+                {showValidade && <th className="num" style={{ minWidth: 70 }}>Validade</th>}
+                {showValidade && <th className="num">Últ. Entrada</th>}
+                {showValidade && <th className="num">Vence em <SortBtn col="venceEm" /></th>}
                 <th className="num">Estoque <SortBtn col="estoque" /></th>
                 <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
                 <th className="num">Cobertura <SortBtn col="coverageDays" /></th>
@@ -2353,9 +2365,6 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                 <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
                 <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
                 <th>Situação</th>
-                {showValidade && <th className="num">Última Entrada</th>}
-                {showValidade && <th className="num" style={{ minWidth: 80 }}>Validade</th>}
-                {showValidade && <th className="num">Vence em</th>}
               </tr>
             </thead>
             <tbody>
@@ -2366,6 +2375,23 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                     <ItemTagSelect product={p} products={products} persistProducts={persistProducts} />
                   </td>
                   <td className="mono">{p.codigo}</td>
+                  {showValidade && (() => {
+                    const vs = getValidadeStatus(p);
+                    return (<>
+                      <td className="num mono" onClick={(e) => e.stopPropagation()}>
+                        <ValidadeMesesInput product={p} products={products} persistProducts={persistProducts} />
+                      </td>
+                      <td className="num mono" style={{ fontSize: 11 }}>{fmtBrDate(p.ultimaEntrada)}</td>
+                      <td className="num" style={{ whiteSpace: "nowrap" }}>
+                        {vs.status === "semDados" ? <span style={{ color: "#bbb", fontSize: 12 }}>—</span> : (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                            <ValidadeIcon status={vs.status} />
+                            <span style={{ fontFamily: "monospace", fontSize: 11 }}>{vs.diasRestantes}d</span>
+                          </span>
+                        )}
+                      </td>
+                    </>);
+                  })()}
                   <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                   <td className="num mono">{p.vendas30 ?? "—"}</td>
                   <td className={"num mono" + (p.status === "critico" ? " vivo-below-min" : "")}>{p.coverageDays !== null ? `${p.coverageDays}d` : "—"}</td>
@@ -2377,23 +2403,6 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                     {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
                     {p.status === "ok" && <span className="vivo-badge vivo-badge-ok">OK</span>}
                   </td>
-                  {showValidade && (() => {
-                    const vs = getValidadeStatus(p);
-                    return (<>
-                      <td className="num mono" style={{ fontSize: 11 }}>{fmtBrDate(p.ultimaEntrada)}</td>
-                      <td className="num mono" onClick={(e) => e.stopPropagation()}>
-                        <ValidadeMesesInput product={p} products={products} persistProducts={persistProducts} />
-                      </td>
-                      <td className="num" style={{ whiteSpace: "nowrap" }}>
-                        {vs.status === "semDados" ? <span style={{ color: "#bbb", fontSize: 12 }}>—</span> : (
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
-                            <ValidadeIcon status={vs.status} />
-                            <span style={{ fontFamily: "monospace", fontSize: 11 }}>{vs.diasRestantes}d</span>
-                          </span>
-                        )}
-                      </td>
-                    </>);
-                  })()}
                 </tr>
               ))}
               {skusSorted.length === 0 && <tr><td colSpan={showValidade ? 13 : 10} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
@@ -2640,7 +2649,7 @@ function OverviewTab({ products, persistProducts, settings }) {
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
-    else { setSortCol(col); setSortDir("desc"); }
+    else { setSortCol(col); setSortDir(col === "venceEm" ? "asc" : "desc"); }
   }
 
   function SortBtn({ col }) {
@@ -2667,6 +2676,7 @@ function OverviewTab({ products, persistProducts, settings }) {
         const validadeStatus = getValidadeStatus(p);
         return {
           ...p, quality: q, avgDay, coverageDays, status, validadeStatus,
+          venceEm:    validadeStatus.status === "semDados" ? null : validadeStatus.diasRestantes,
           estoqueR:   (p.estoque || 0) * custoLiq(p),
           capitalExc: q.capitalImobilizado,
         };
@@ -2678,6 +2688,14 @@ function OverviewTab({ products, persistProducts, settings }) {
       .filter((p) => p.itemTag !== "inativo") // inativos ocultos por padrão na visão geral
       .filter((p) => validadeFilter === "all" || p.validadeStatus.status === validadeFilter)
       .sort((a, b) => {
+        // "Vence em": itens sem validade cadastrada ficam sempre no fim
+        if (sortCol === "venceEm") {
+          const na = a.venceEm === null || a.venceEm === undefined;
+          const nb = b.venceEm === null || b.venceEm === undefined;
+          if (na && nb) return 0;
+          if (na) return 1;
+          if (nb) return -1;
+        }
         const va = a[sortCol] ?? -Infinity;
         const vb = b[sortCol] ?? -Infinity;
         if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
@@ -2806,7 +2824,7 @@ function OverviewTab({ products, persistProducts, settings }) {
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
               <th>Situação</th>
-              <th className="num" title="Status de validade do produto">Val</th>
+              <th className="num" title="Dias até o vencimento (última entrada + validade)">Vence em <SortBtn col="venceEm" /></th>
             </tr>
           </thead>
           <tbody>
@@ -2840,8 +2858,13 @@ function OverviewTab({ products, persistProducts, settings }) {
                   {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
                   {p.status === "ok"      && <span className="vivo-badge vivo-badge-ok">OK</span>}
                 </td>
-                <td className="num" style={{ textAlign: "center" }}>
-                  <ValidadeIcon status={p.validadeStatus.status} size={13} />
+                <td className="num" style={{ whiteSpace: "nowrap" }}>
+                  {p.validadeStatus.status === "semDados" ? <span style={{ color: "#bbb", fontSize: 12 }}>—</span> : (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                      <ValidadeIcon status={p.validadeStatus.status} size={13} />
+                      <span style={{ fontFamily: "monospace", fontSize: 11 }}>{p.validadeStatus.diasRestantes}d</span>
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}
