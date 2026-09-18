@@ -30,6 +30,7 @@ const HEADER_MAP = {
   vendas180: ["vendas_180_dias", "vendas180", "qtd_vendida_180_dias", "vendas_ultimos_180_dias", "180_dias"],
   precoCusto: [], // nunca vem do relatório — só da Pasta1.xlsx (Tabela de preços)
   custoErp: ["vlr_custo", "valor_custo", "preco_custo", "preco_de_custo", "custo_unitario", "custo_medio", "vlr_de_custo", "custo"],
+  dt_ult_entrada: ["dt_ult_entrada", "dt_ult__entrada", "data_ultima_entrada", "ult_entrada", "ultima_entrada", "dt_ultima_entrada"],
 };
 
 function mapRowToFields(row) {
@@ -85,6 +86,106 @@ function roundToCx(qty, cxMaster) {
   const upper = lower + cxMaster;
   const mid   = lower + cxMaster / 2;
   return qty >= mid ? upper : Math.max(lower, cxMaster);
+}
+
+// Converte data no formato DD/MM/AAAA para timestamp (ms)
+function parseBrDate(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+
+// Formata timestamp como DD/MM/AAAA
+function fmtBrDate(ts) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+// Calcula status de validade de um produto
+// Retorna { status: "vermelho"|"amarelo"|"verde"|"semDados", diasRestantes, vencimento }
+function getValidadeStatus(p) {
+  const ultimaEntrada = p.ultimaEntrada;
+  const validadeMeses = p.validadeMeses;
+  if (!ultimaEntrada || !validadeMeses || validadeMeses <= 0) return { status: "semDados" };
+  if (!p.estoque || p.estoque === 0) return { status: "semDados" }; // estoque zero → ignora
+
+  // Adiciona validadeMeses meses à data de última entrada
+  const dt = new Date(ultimaEntrada);
+  dt.setMonth(dt.getMonth() + Number(validadeMeses));
+  const vencimento = dt.getTime();
+
+  const hoje = Date.now();
+  const diasRestantes = Math.floor((vencimento - hoje) / (1000 * 60 * 60 * 24));
+
+  let status;
+  if (diasRestantes <= 60) status = "vermelho";
+  else if (diasRestantes <= 90) status = "amarelo";
+  else status = "verde";
+
+  return { status, diasRestantes, vencimento };
+}
+
+// Ícone colorido de validade
+function ValidadeIcon({ status, size = 14 }) {
+  if (status === "semDados") return <span style={{ color: "#ccc", fontSize: size }}>○</span>;
+  if (status === "vermelho") return <span title="Vence em ≤60 dias" style={{ fontSize: size }}>🔴</span>;
+  if (status === "amarelo")  return <span title="Vence em ≤90 dias" style={{ fontSize: size }}>🟡</span>;
+  return <span title="Vence em >90 dias" style={{ fontSize: size }}>✅</span>;
+}
+
+// Input editável para validade em meses (por SKU)
+function ValidadeMesesInput({ product, products, persistProducts }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal]         = useState("");
+
+  function startEdit(e) {
+    e.stopPropagation();
+    setVal(product.validadeMeses !== undefined && product.validadeMeses !== null ? String(product.validadeMeses) : "");
+    setEditing(true);
+  }
+
+  async function save() {
+    const n = parseInt(val, 10);
+    const validadeMeses = !isNaN(n) && n > 0 ? n : null;
+    const next = { ...products, [product.codigo]: { ...products[product.codigo], validadeMeses } };
+    await persistProducts(next);
+    setEditing(false);
+  }
+
+  function handleKey(e) {
+    if (e.key === "Enter") save();
+    if (e.key === "Escape") setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        min={1}
+        style={{ width: 52, fontSize: 11, fontFamily: "monospace", textAlign: "right", padding: "1px 4px" }}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={save}
+        onKeyDown={handleKey}
+        onClick={(e) => e.stopPropagation()}
+      />
+    );
+  }
+
+  const v = product.validadeMeses;
+  return (
+    <span
+      title="Clique para editar validade em meses"
+      style={{ cursor: "pointer", fontFamily: "monospace", fontSize: 11, color: v ? "var(--ink)" : "#aaa", borderBottom: "1px dashed #ccc", padding: "0 2px" }}
+      onClick={startEdit}
+    >
+      {v ? `${v}m` : "—"}
+    </span>
+  );
 }
 
 // Tags de item — independentes da tag do fornecedor
@@ -965,6 +1066,8 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
         const estoque = toNumber(row.estoque);
         // custo do ERP vai para custoLiquido — precoCusto só vem da Pasta1.xlsx (Tabela de preços)
         const custoErp = row.custoErp !== undefined && row.custoErp !== "" ? toNumber(row.custoErp) : undefined;
+        // Data última entrada — formato DD/MM/AAAA
+        const ultimaEntradaRaw = row.dt_ult_entrada !== undefined && row.dt_ult_entrada !== "" ? parseBrDate(String(row.dt_ult_entrada)) : undefined;
 
         if (!merged[codigo]) {
           merged[codigo] = { codigo, fornecedor, item, estoque, custoErp, vendas: {} };
@@ -973,6 +1076,7 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
         merged[codigo].fornecedor = fornecedor || merged[codigo].fornecedor;
         merged[codigo].item = item || merged[codigo].item;
         if (custoErp !== undefined) merged[codigo].custoErp = custoErp;
+        if (ultimaEntradaRaw !== undefined) merged[codigo].ultimaEntrada = ultimaEntradaRaw;
 
         let salesValue;
         if (file.period === 30) salesValue = row.vendas30 !== undefined ? row.vendas30 : row.vendas90 !== undefined ? row.vendas90 : row.vendas180;
@@ -1013,6 +1117,8 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
           precoCusto: existing.precoCusto,
           // custoLiquido: mantém o da tabela se existir, senão usa o do ERP
           custoLiquido: existing.custoLiquido ?? m.custoErp ?? existing.custoLiquido,
+          // ultima entrada: atualiza se vier no relatório
+          ultimaEntrada: m.ultimaEntrada ?? existing.ultimaEntrada,
           vendas30: v30 !== undefined ? v30 : existing.vendas30,
           vendas90: v90 !== undefined ? v90 : existing.vendas90,
           vendas180: v180 !== undefined ? v180 : existing.vendas180,
@@ -1033,6 +1139,7 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
           estoque: m.estoque,
           precoCusto: undefined, // será preenchido pela Tabela de preços
           custoLiquido: m.custoErp, // usa custo do ERP como líquido até a tabela ser importada
+          ultimaEntrada: m.ultimaEntrada ?? undefined,
           vendas30: v30,
           vendas90: v90,
           vendas180: v180,
@@ -2084,6 +2191,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
   const [itemTagFilter, setItemTagFilter] = useState("all");
   const [itemColWidth, setItemColWidth] = useState(220);
   const [drawerProduct, setDrawerProduct] = useState(null);
+  const [showValidade, setShowValidade] = useState(false);
 
   const TAG_STYLES = {
     escalando: { background: "#e1ecd9", color: "#3c6b2a" },
@@ -2202,6 +2310,14 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
             <input type="range" min={120} max={500} step={10} value={itemColWidth} onChange={(e) => setItemColWidth(Number(e.target.value))} style={{ width: 100 }} />
             <span style={{ color: "var(--ink-soft)", fontFamily: "monospace" }}>{itemColWidth}px</span>
           </div>
+          <button
+            className={"vivo-supplier-tag-chip" + (showValidade ? " is-active-neutral" : "")}
+            onClick={() => setShowValidade((v) => !v)}
+            title="Mostrar/ocultar colunas de validade"
+            style={{ fontSize: 12 }}
+          >
+            🗓 Validade
+          </button>
           <div className="vivo-supplier-tag-chips">
             <span className="vivo-supplier-tag-label">Tag item:</span>
             {["all","escalando","liquidacao","inativo"].map((t) => (
@@ -2237,6 +2353,9 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                 <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
                 <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
                 <th>Situação</th>
+                {showValidade && <th className="num">Última Entrada</th>}
+                {showValidade && <th className="num" style={{ minWidth: 80 }}>Validade</th>}
+                {showValidade && <th className="num">Vence em</th>}
               </tr>
             </thead>
             <tbody>
@@ -2258,9 +2377,26 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                     {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
                     {p.status === "ok" && <span className="vivo-badge vivo-badge-ok">OK</span>}
                   </td>
+                  {showValidade && (() => {
+                    const vs = getValidadeStatus(p);
+                    return (<>
+                      <td className="num mono" style={{ fontSize: 11 }}>{fmtBrDate(p.ultimaEntrada)}</td>
+                      <td className="num mono" onClick={(e) => e.stopPropagation()}>
+                        <ValidadeMesesInput product={p} products={products} persistProducts={persistProducts} />
+                      </td>
+                      <td className="num" style={{ whiteSpace: "nowrap" }}>
+                        {vs.status === "semDados" ? <span style={{ color: "#bbb", fontSize: 12 }}>—</span> : (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                            <ValidadeIcon status={vs.status} />
+                            <span style={{ fontFamily: "monospace", fontSize: 11 }}>{vs.diasRestantes}d</span>
+                          </span>
+                        )}
+                      </td>
+                    </>);
+                  })()}
                 </tr>
               ))}
-              {skusSorted.length === 0 && <tr><td colSpan={10} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
+              {skusSorted.length === 0 && <tr><td colSpan={showValidade ? 13 : 10} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2500,6 +2636,7 @@ function OverviewTab({ products, persistProducts, settings }) {
   const [sortCol, setSortCol]   = useState("capitalExc");
   const [sortDir, setSortDir]   = useState("desc");
   const [drawerProduct, setDrawerProduct] = useState(null);
+  const [validadeFilter, setValidadeFilter] = useState("all"); // "all"|"vermelho"|"amarelo"|"verde"
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
@@ -2527,8 +2664,9 @@ function OverviewTab({ products, persistProducts, settings }) {
           ? "excesso"
           : avgDay > 0 && coverageDays !== null && coverageDays < 15
             ? "critico" : "ok";
+        const validadeStatus = getValidadeStatus(p);
         return {
-          ...p, quality: q, avgDay, coverageDays, status,
+          ...p, quality: q, avgDay, coverageDays, status, validadeStatus,
           estoqueR:   (p.estoque || 0) * custoLiq(p),
           capitalExc: q.capitalImobilizado,
         };
@@ -2538,13 +2676,14 @@ function OverviewTab({ products, persistProducts, settings }) {
   const skusSorted = useMemo(() => {
     return [...skus]
       .filter((p) => p.itemTag !== "inativo") // inativos ocultos por padrão na visão geral
+      .filter((p) => validadeFilter === "all" || p.validadeStatus.status === validadeFilter)
       .sort((a, b) => {
         const va = a[sortCol] ?? -Infinity;
         const vb = b[sortCol] ?? -Infinity;
         if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
         return sortDir === "desc" ? vb - va : va - vb;
       });
-  }, [skus, sortCol, sortDir]);
+  }, [skus, sortCol, sortDir, validadeFilter]);
 
   const { page, setPage, totalPages, pageItems, totalCount } = usePagination(skusSorted);
 
@@ -2630,6 +2769,27 @@ function OverviewTab({ products, persistProducts, settings }) {
         />
       </div>
 
+      {/* Filtro de validade */}
+      <div className="vivo-toolbar" style={{ marginBottom: 10 }}>
+        <div className="vivo-supplier-tag-chips">
+          <span className="vivo-supplier-tag-label">Validade:</span>
+          {[
+            { value: "all",      label: "Todas" },
+            { value: "vermelho", label: "🔴 ≤60d" },
+            { value: "amarelo",  label: "🟡 ≤90d" },
+            { value: "verde",    label: "✅ >90d" },
+          ].map((opt) => (
+            <button
+              key={opt.value}
+              className={"vivo-supplier-tag-chip" + (validadeFilter === opt.value ? " is-active-neutral" : "")}
+              onClick={() => setValidadeFilter(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Tabela geral de SKUs */}
       <div className="vivo-table-wrap vivo-card">
         <table className="vivo-table vivo-table-compact">
@@ -2646,6 +2806,7 @@ function OverviewTab({ products, persistProducts, settings }) {
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
               <th>Situação</th>
+              <th className="num" title="Status de validade do produto">Val</th>
             </tr>
           </thead>
           <tbody>
@@ -2679,10 +2840,13 @@ function OverviewTab({ products, persistProducts, settings }) {
                   {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
                   {p.status === "ok"      && <span className="vivo-badge vivo-badge-ok">OK</span>}
                 </td>
+                <td className="num" style={{ textAlign: "center" }}>
+                  <ValidadeIcon status={p.validadeStatus.status} size={13} />
+                </td>
               </tr>
             ))}
             {pageItems.length === 0 && (
-              <tr><td colSpan={11} className="vivo-table-empty">Nenhum produto importado.</td></tr>
+              <tr><td colSpan={12} className="vivo-table-empty">Nenhum produto importado.</td></tr>
             )}
           </tbody>
         </table>
