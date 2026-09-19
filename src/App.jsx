@@ -147,12 +147,14 @@ function ValidadeMesesInput({ product, products, persistProducts }) {
     setEditing(true);
   }
 
-  async function save() {
+  function save() {
+    if (!editing) return; // evita disparo duplo (Enter + blur)
     const n = parseInt(val, 10);
     const validadeMeses = !isNaN(n) && n > 0 ? n : null;
+    setEditing(false); // fecha na hora — a tela atualiza via setProducts, gravação segue em segundo plano
+    if (validadeMeses === (product.validadeMeses ?? null)) return; // nada mudou, não grava
     const next = { ...products, [product.codigo]: { ...products[product.codigo], validadeMeses } };
-    await persistProducts(next);
-    setEditing(false);
+    persistProducts(next);
   }
 
   function handleKey(e) {
@@ -478,7 +480,7 @@ async function storageGet(key, fallback) {
   return sbGet(key, fallback);
 }
 
-async function storageSet(key, value) {
+async function storageSetRaw(key, value) {
   if (IS_CLAUDE_ARTIFACT) {
     try {
       await withTimeout(window.storage.set(key, JSON.stringify(value), true), 5000, null);
@@ -488,6 +490,30 @@ async function storageSet(key, value) {
     return;
   }
   return sbSet(key, value);
+}
+
+// Fila de gravação por chave: garante ordem (uma gravação antiga nunca sobrescreve
+// uma mais nova) e coalesce edições rápidas em sequência — só o valor mais recente
+// é enviado quando a gravação anterior termina.
+const _writeQueue = {}; // key -> { running: Promise|null, pending: value|undefined }
+async function storageSet(key, value) {
+  const q = _writeQueue[key] || (_writeQueue[key] = { running: null, pending: undefined });
+  if (q.running) {
+    q.pending = value; // substitui qualquer valor pendente anterior
+    return q.running;
+  }
+  q.running = (async () => {
+    let current = value;
+    while (true) {
+      try { await storageSetRaw(key, current); }
+      catch (e) { console.error("storageSet error", key, e); }
+      if (q.pending === undefined) break;
+      current = q.pending;
+      q.pending = undefined;
+    }
+    q.running = null;
+  })();
+  return q.running;
 }
 
 async function storageGetPrivate(key, fallback) {
@@ -1556,12 +1582,13 @@ function CapitalChart({ products, supplierFilter, excessCodes }) {
   const minV = Math.min(...values);
   const maxV = Math.max(...values);
   const range = maxV - minV || 1;
-  const toX = (i) => PAD.left + (i / (series.length - 1)) * innerW;
-  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
-  const points = series.map((s, i) => `${toX(i)},${toY(s.capital)}`).join(" ");
-  const areaPoints = `${toX(0)},${PAD.top + innerH} ${points} ${toX(series.length - 1)},${PAD.top + innerH}`;
   const last = series[series.length - 1];
   const first = series[0];
+  const tsRange = last.ts - first.ts || 1;
+  const toX = (ts) => PAD.left + ((ts - first.ts) / tsRange) * innerW;
+  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
+  const points = series.map((s) => `${toX(s.ts)},${toY(s.capital)}`).join(" ");
+  const areaPoints = `${toX(first.ts)},${PAD.top + innerH} ${points} ${toX(last.ts)},${PAD.top + innerH}`;
   const delta = last.capital - first.capital;
   const deltaPct = first.capital > 0 ? (delta / first.capital) * 100 : 0;
   const trend = Math.abs(deltaPct) < 3 ? "flat" : delta > 0 ? "up" : "down";
@@ -1573,13 +1600,13 @@ function CapitalChart({ products, supplierFilter, excessCodes }) {
     const rect = svg.getBoundingClientRect();
     const vbX = (e.clientX - rect.left) * (W / rect.width);
     let closest = 0, minDist = Infinity;
-    series.forEach((_, i) => { const dist = Math.abs(toX(i) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
-    setHover({ i: closest, x: toX(closest), y: toY(series[closest].capital), capital: series[closest].capital, ts: series[closest].ts });
+    series.forEach((s, i) => { const dist = Math.abs(toX(s.ts) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
+    setHover({ i: closest, x: toX(series[closest].ts), y: toY(series[closest].capital), capital: series[closest].capital, ts: series[closest].ts });
   }
 
-  const tooltipLeft = hover ? hover.i < series.length * 0.65 : false;
+  const tooltipLeft = hover ? toX(hover.ts) < PAD.left + innerW * 0.65 : false;
   const hoverDelta = hover && hover.i > 0 ? hover.capital - series[hover.i - 1].capital : null;
-  const displayPoint = hover || { capital: last.capital, ts: last.ts, x: toX(series.length - 1), y: toY(last.capital) };
+  const displayPoint = hover || { capital: last.capital, ts: last.ts, x: toX(last.ts), y: toY(last.capital) };
 
   return (
     <div className="vivo-capital-chart">
@@ -1617,8 +1644,8 @@ function CapitalChart({ products, supplierFilter, excessCodes }) {
           <polyline points={points} fill="none" stroke={trendColor} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
           {hover && <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
           <circle cx={displayPoint.x} cy={displayPoint.y} r={hover ? 4 : 3} fill={hover ? "var(--ink)" : trendColor} stroke="var(--card)" strokeWidth="1.5" />
-          <text x={toX(0)} y={H - 4} fontSize="9" fill="var(--ink-soft)" textAnchor="start">{fmtDateShort(first.ts)}</text>
-          <text x={toX(series.length - 1)} y={H - 4} fontSize="9" fill="var(--ink-soft)" textAnchor="end">{fmtDateShort(last.ts)}</text>
+          <text x={toX(first.ts)} y={H - 4} fontSize="9" fill="var(--ink-soft)" textAnchor="start">{fmtDateShort(first.ts)}</text>
+          <text x={toX(last.ts)} y={H - 4} fontSize="9" fill="var(--ink-soft)" textAnchor="end">{fmtDateShort(last.ts)}</text>
         </svg>
         {hover && (
           <div className="vivo-chart-tooltip" style={{ left: tooltipLeft ? `calc(${(hover.x / W) * 100}% + 8px)` : "auto", right: tooltipLeft ? "auto" : `calc(${((W - hover.x) / W) * 100}% + 8px)`, top: "4px" }}>
@@ -2192,6 +2219,14 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
   const [itemColWidth, setItemColWidth] = useState(220);
   const [drawerProduct, setDrawerProduct] = useState(null);
   const [showValidade, setShowValidade] = useState(false);
+  const [scrollWidth, setScrollWidth] = useState(0);
+  const topScrollRef = React.useRef(null);
+  const tableWrapRef = React.useRef(null);
+  const measureScrollWidth = useCallback(() => { if (tableWrapRef.current) setScrollWidth(tableWrapRef.current.scrollWidth); }, []);
+  useEffect(() => { measureScrollWidth(); window.addEventListener("resize", measureScrollWidth); return () => window.removeEventListener("resize", measureScrollWidth); }, [measureScrollWidth]);
+  useEffect(() => { measureScrollWidth(); }, [showValidade]); // remede largura ao mostrar/ocultar colunas de validade
+  function syncFromTop(e) { if (tableWrapRef.current) tableWrapRef.current.scrollLeft = e.target.scrollLeft; }
+  function syncFromTable(e) { if (topScrollRef.current) topScrollRef.current.scrollLeft = e.target.scrollLeft; }
 
   const TAG_STYLES = {
     escalando: { background: "#e1ecd9", color: "#3c6b2a" },
@@ -2348,7 +2383,8 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
           </div>
         </div>
 
-        <div className="vivo-table-wrap vivo-card">
+        <div className="vivo-top-scrollbar" ref={topScrollRef} onScroll={syncFromTop}><div style={{ width: scrollWidth, height: 1 }} /></div>
+        <div className="vivo-table-wrap vivo-card" ref={tableWrapRef} onScroll={syncFromTable}>
           <table className="vivo-table vivo-table-compact">
             <thead>
               <tr>
@@ -2492,11 +2528,12 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
   const values = series.map((s) => s.capital);
   const allValues = [...values];
   const minV = Math.min(...allValues), maxV = Math.max(...allValues), range = maxV - minV || 1;
-  const toX = (i) => PAD.left + (i / (series.length - 1)) * innerW;
-  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
-  const points = series.map((s, i) => `${toX(i)},${toY(s.capital)}`).join(" ");
-  const areaPoints = `${toX(0)},${PAD.top + innerH} ${points} ${toX(series.length - 1)},${PAD.top + innerH}`;
   const last = series[series.length - 1], first = series[0];
+  const tsRange = last.ts - first.ts || 1;
+  const toX = (ts) => PAD.left + ((ts - first.ts) / tsRange) * innerW;
+  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
+  const points = series.map((s) => `${toX(s.ts)},${toY(s.capital)}`).join(" ");
+  const areaPoints = `${toX(first.ts)},${PAD.top + innerH} ${points} ${toX(last.ts)},${PAD.top + innerH}`;
   const delta = last.capital - first.capital;
   const deltaPct = first.capital > 0 ? ((delta / first.capital) * 100).toFixed(1) : null;
   const gridLines = [0, 0.5, 1].map((pct) => ({ y: PAD.top + innerH - pct * innerH, label: fmtCurrency(minV + pct * range) }));
@@ -2515,12 +2552,12 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
     const rect = svg.getBoundingClientRect();
     const vbX = (e.clientX - rect.left) * (W / rect.width);
     let closest = 0, minDist = Infinity;
-    series.forEach((_, i) => { const dist = Math.abs(toX(i) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
+    series.forEach((s, i) => { const dist = Math.abs(toX(s.ts) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
     const prev = closest > 0 ? series[closest - 1] : null;
-    setHover({ i: closest, x: toX(closest), y: toY(series[closest].capital), value: series[closest].capital, ts: series[closest].ts, diff: prev ? series[closest].capital - prev.capital : null });
+    setHover({ i: closest, x: toX(series[closest].ts), y: toY(series[closest].capital), value: series[closest].capital, ts: series[closest].ts, diff: prev ? series[closest].capital - prev.capital : null });
   }
 
-  const tooltipLeft = hover ? hover.i < series.length * 0.65 : false;
+  const tooltipLeft = hover ? toX(hover.ts) < PAD.left + innerW * 0.65 : false;
   const gradId = `cgrad-${title.slice(0, 8).replace(/\s/g, "")}`;
 
   return (
@@ -2553,8 +2590,8 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
           <polygon points={areaPoints} fill={`url(#${gradId})`} />
           <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
           {hover && <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
-          <circle cx={hover ? hover.x : toX(series.length - 1)} cy={hover ? hover.y : toY(last.capital)} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
-          {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.i)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
+          <circle cx={hover ? hover.x : toX(last.ts)} cy={hover ? hover.y : toY(last.capital)} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
+          {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.ts)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
           <line x1={PAD.left} y1={PAD.top + innerH} x2={PAD.left + innerW} y2={PAD.top + innerH} stroke="var(--line)" strokeWidth="1" />
         </svg>
         {hover && (
@@ -2579,11 +2616,12 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
   const innerW = W - PAD.left - PAD.right, innerH = H - PAD.top - PAD.bottom;
   const values = series.map((s) => s[valueKey]);
   const minV = Math.min(...values), maxV = Math.max(...values), range = maxV - minV || 1;
-  const toX = (i) => PAD.left + (i / (series.length - 1)) * innerW;
-  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
-  const points = series.map((s, i) => `${toX(i)},${toY(s[valueKey])}`).join(" ");
-  const areaPoints = `${toX(0)},${PAD.top + innerH} ${points} ${toX(series.length - 1)},${PAD.top + innerH}`;
   const last = series[series.length - 1], first = series[0];
+  const tsRange = last.ts - first.ts || 1;
+  const toX = (ts) => PAD.left + ((ts - first.ts) / tsRange) * innerW;
+  const toY = (v) => PAD.top + innerH - ((v - minV) / range) * innerH;
+  const points = series.map((s) => `${toX(s.ts)},${toY(s[valueKey])}`).join(" ");
+  const areaPoints = `${toX(first.ts)},${PAD.top + innerH} ${points} ${toX(last.ts)},${PAD.top + innerH}`;
   const delta = last[valueKey] - first[valueKey];
   const deltaPct = first[valueKey] > 0 ? ((delta / first[valueKey]) * 100).toFixed(1) : null;
   const gridLines = [0, 0.5, 1].map((pct) => ({ y: PAD.top + innerH - pct * innerH, label: Math.round(minV + pct * range) }));
@@ -2602,12 +2640,12 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
     const rect = svg.getBoundingClientRect();
     const vbX = (e.clientX - rect.left) * (W / rect.width);
     let closest = 0, minDist = Infinity;
-    series.forEach((_, i) => { const dist = Math.abs(toX(i) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
+    series.forEach((s, i) => { const dist = Math.abs(toX(s.ts) - vbX); if (dist < minDist) { minDist = dist; closest = i; } });
     const prev = closest > 0 ? series[closest - 1] : null;
-    setHover({ i: closest, x: toX(closest), y: toY(series[closest][valueKey]), value: series[closest][valueKey], ts: series[closest].ts, diff: prev ? series[closest][valueKey] - prev[valueKey] : null });
+    setHover({ i: closest, x: toX(series[closest].ts), y: toY(series[closest][valueKey]), value: series[closest][valueKey], ts: series[closest].ts, diff: prev ? series[closest][valueKey] - prev[valueKey] : null });
   }
 
-  const tooltipLeft = hover ? hover.i < series.length * 0.65 : false;
+  const tooltipLeft = hover ? toX(hover.ts) < PAD.left + innerW * 0.65 : false;
 
   return (
     <div>
@@ -2624,8 +2662,8 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
           <polygon points={areaPoints} fill={`url(#grad-${valueKey})`} />
           <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
           {hover && <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
-          <circle cx={hover ? hover.x : toX(series.length - 1)} cy={hover ? hover.y : toY(last[valueKey])} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
-          {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.i)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
+          <circle cx={hover ? hover.x : toX(last.ts)} cy={hover ? hover.y : toY(last[valueKey])} r={hover ? 5 : 4} fill={hover ? "var(--ink)" : color} stroke="var(--card)" strokeWidth="2" />
+          {xLabels.map((lb) => (<text key={lb.i} x={toX(lb.ts)} y={H - 6} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(lb.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}</text>))}
           <line x1={PAD.left} y1={PAD.top + innerH} x2={PAD.left + innerW} y2={PAD.top + innerH} stroke="var(--line)" strokeWidth="1" />
         </svg>
         {hover && (
@@ -2646,6 +2684,13 @@ function OverviewTab({ products, persistProducts, settings }) {
   const [sortDir, setSortDir]   = useState("desc");
   const [drawerProduct, setDrawerProduct] = useState(null);
   const [validadeFilter, setValidadeFilter] = useState("all"); // "all"|"vermelho"|"amarelo"|"verde"
+  const [scrollWidth, setScrollWidth] = useState(0);
+  const topScrollRef = React.useRef(null);
+  const tableWrapRef = React.useRef(null);
+  const measureScrollWidth = useCallback(() => { if (tableWrapRef.current) setScrollWidth(tableWrapRef.current.scrollWidth); }, []);
+  useEffect(() => { measureScrollWidth(); window.addEventListener("resize", measureScrollWidth); return () => window.removeEventListener("resize", measureScrollWidth); }, [measureScrollWidth]);
+  function syncFromTop(e) { if (tableWrapRef.current) tableWrapRef.current.scrollLeft = e.target.scrollLeft; }
+  function syncFromTable(e) { if (topScrollRef.current) topScrollRef.current.scrollLeft = e.target.scrollLeft; }
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
@@ -2809,7 +2854,8 @@ function OverviewTab({ products, persistProducts, settings }) {
       </div>
 
       {/* Tabela geral de SKUs */}
-      <div className="vivo-table-wrap vivo-card">
+      <div className="vivo-top-scrollbar" ref={topScrollRef} onScroll={syncFromTop}><div style={{ width: scrollWidth, height: 1 }} /></div>
+      <div className="vivo-table-wrap vivo-card" ref={tableWrapRef} onScroll={syncFromTable}>
         <table className="vivo-table vivo-table-compact">
           <thead>
             <tr>
