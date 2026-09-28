@@ -1087,7 +1087,7 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
       for (const row of file.withSupplier) {
         const codigo = String(row.codigo || "").trim() || String(row.item || "").trim();
         if (!codigo) continue;
-        const fornecedor = String(row.fornecedor).trim();
+        const fornecedor = String(row.fornecedor).replace(/[\r\n]+/g, " ").trim();
         const item = String(row.item || "").trim() || codigo;
         const estoque = toNumber(row.estoque);
         // custo do ERP vai para custoLiquido — precoCusto só vem da Pasta1.xlsx (Tabela de preços)
@@ -1136,6 +1136,9 @@ function ImportTab({ products, persistProducts, history, persistHistory, goToPro
         updatedCount++;
         next[codigo] = {
           ...existing,
+          // Item voltou a aparecer no relatório → reativa (inativação só vale para itens ausentes)
+          inactive: false,
+          inactivatedAt: undefined,
           fornecedor: m.fornecedor || existing.fornecedor,
           item: m.item || existing.item,
           estoque: m.estoque,
@@ -1488,7 +1491,10 @@ function TrendBadge({ status }) {
   return <span className="vivo-badge vivo-badge-muted">Sem dados</span>;
 }
 
-function buildCapitalSeries(products, supplierFilter, excessCodes, days = 90) {
+// Janela dos gráficos históricos: 6 meses
+const CHART_WINDOW_DAYS = 180;
+
+function buildCapitalSeries(products, supplierFilter, excessCodes, days = CHART_WINDOW_DAYS) {
   const now = Date.now();
   const cutoff = now - days * MS_PER_DAY;
   const productList = Object.values(products).filter((p) =>
@@ -1512,7 +1518,7 @@ function buildCapitalSeries(products, supplierFilter, excessCodes, days = 90) {
     .sort((a, b) => a.ts - b.ts);
 }
 
-function buildTotalStockSeries(products, supplierFilter, days = 90) {
+function buildTotalStockSeries(products, supplierFilter, days = CHART_WINDOW_DAYS) {
   const now = Date.now();
   const cutoff = now - days * MS_PER_DAY;
   const productList = Object.values(products).filter((p) => !p.inactive && (supplierFilter === "all" || p.fornecedor === supplierFilter));
@@ -1535,7 +1541,7 @@ function buildTotalStockSeries(products, supplierFilter, days = 90) {
     .sort((a, b) => a.ts - b.ts);
 }
 
-function buildExcessStockSeries(products, supplierFilter, thresholdDays = 90, days = 90) {
+function buildExcessStockSeries(products, supplierFilter, thresholdDays = 90, days = CHART_WINDOW_DAYS) {
   const now = Date.now();
   const cutoff = now - days * MS_PER_DAY;
   const productList = Object.values(products).filter((p) => !p.inactive && (supplierFilter === "all" || p.fornecedor === supplierFilter));
@@ -1569,7 +1575,7 @@ function CapitalChart({ products, supplierFilter, excessCodes }) {
   const [hover, setHover] = useState(null);
   const svgRef = React.useRef(null);
 
-  const series = useMemo(() => buildCapitalSeries(products, supplierFilter, excessCodes, 90), [products, supplierFilter, excessCodes]);
+  const series = useMemo(() => buildCapitalSeries(products, supplierFilter, excessCodes, CHART_WINDOW_DAYS), [products, supplierFilter, excessCodes]);
 
   if (series.length < 2) {
     return <div className="vivo-capital-chart vivo-capital-chart-empty"><span>Dados insuficientes para o gráfico</span></div>;
@@ -2126,14 +2132,15 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
   const currentProduct = products[product.codigo] || product;
   const observations = currentProduct.observations || [];
 
-  const salesSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.vendas30 !== undefined).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.vendas30 ?? 0 })), [currentProduct.salesHistory]);
-  const stockSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.estoque !== undefined).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.estoque ?? 0 })), [currentProduct.salesHistory]);
+  const windowStart = Date.now() - CHART_WINDOW_DAYS * MS_PER_DAY;
+  const salesSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.vendas30 !== undefined && s.ts >= windowStart).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.vendas30 ?? 0 })), [currentProduct.salesHistory]);
+  const stockSeries = useMemo(() => (currentProduct.salesHistory || []).filter((s) => s.estoque !== undefined && s.ts >= windowStart).sort((a, b) => a.ts - b.ts).map((s) => ({ ts: s.ts, total: s.estoque ?? 0 })), [currentProduct.salesHistory]);
 
   // Capital excedente por importação: unidades acima de 90d de cobertura × custo líquido
   const excessSeries = useMemo(() => {
     const custo = custoLiq(currentProduct);
     return (currentProduct.salesHistory || [])
-      .filter((s) => s.estoque !== undefined)
+      .filter((s) => s.estoque !== undefined && s.ts >= windowStart)
       .sort((a, b) => a.ts - b.ts)
       .map((s) => {
         const avgDay  = (s.vendas30 || 0) / 30;
@@ -2294,7 +2301,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
 
   const salesSeries = useMemo(() => {
     const byDay = {};
-    const cutoff = Date.now() - 90 * MS_PER_DAY;
+    const cutoff = Date.now() - CHART_WINDOW_DAYS * MS_PER_DAY;
     for (const p of skus) {
       for (const snap of (p.salesHistory || [])) {
         if (snap.ts < cutoff || snap.vendas30 === undefined) continue;
@@ -2313,8 +2320,8 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
       .sort((a, b) => a.ts - b.ts);
   }, [skus]);
 
-  const totalStockSeries = useMemo(() => buildTotalStockSeries(products, fornecedor, 90), [products, fornecedor]);
-  const excessStockSeries = useMemo(() => buildExcessStockSeries(products, fornecedor, 90, 90), [products, fornecedor]);
+  const totalStockSeries = useMemo(() => buildTotalStockSeries(products, fornecedor, CHART_WINDOW_DAYS), [products, fornecedor]);
+  const excessStockSeries = useMemo(() => buildExcessStockSeries(products, fornecedor, 90, CHART_WINDOW_DAYS), [products, fornecedor]);
 
   return (
     <div className="vivo-page">
@@ -2756,8 +2763,8 @@ function OverviewTab({ products, persistProducts, settings }) {
 
   // Série de capital excedente global (todos os fornecedores)
   const excessCodes = useMemo(() => new Set(skus.filter((p) => p.quality.isExcess).map((p) => p.codigo)), [skus]);
-  const excessSeries    = useMemo(() => buildExcessStockSeries(products, "all", 90, 90), [products]);
-  const totalStockSeries = useMemo(() => buildTotalStockSeries(products, "all", 90), [products]);
+  const excessSeries    = useMemo(() => buildExcessStockSeries(products, "all", 90, CHART_WINDOW_DAYS), [products]);
+  const totalStockSeries = useMemo(() => buildTotalStockSeries(products, "all", CHART_WINDOW_DAYS), [products]);
 
   // KPIs calculados a partir dos dados atuais (mesma lógica da tabela)
   const totalCapital  = skus.reduce((acc, p) => acc + p.capitalExc, 0);
