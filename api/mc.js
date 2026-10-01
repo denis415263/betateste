@@ -143,7 +143,7 @@ function parseSheet(rows, kind) {
     if (kind === "brand") { delete rec.un; rec.name = id; }
     out[kind === "brand" ? norm(id) : id.toUpperCase()] = rec;
   }
-  return { rows: out, emAndamento: channels.some((c) => c.emAndamento), channels: channels.map((c) => c.key) };
+  return { rows: out, emAndamento: channels.some((c) => c.emAndamento), canaisEmAndamento: channels.filter((c) => c.emAndamento).map((c) => c.key), channels: channels.map((c) => c.key) };
 }
 
 function parseMonth(dadosRows, itensRows) {
@@ -151,6 +151,7 @@ function parseMonth(dadosRows, itensRows) {
   const items = parseSheet(itensRows, "item");
   return {
     emAndamento: brands.emAndamento || items.emAndamento,
+    canaisEmAndamento: Array.from(new Set([...brands.canaisEmAndamento, ...items.canaisEmAndamento])),
     channels: Array.from(new Set([...brands.channels, ...items.channels])),
     brands: brands.rows,
     items: items.rows,
@@ -248,7 +249,7 @@ async function handler(req, res) {
         const m = monthCache[ck];
         const totalFat = Object.values(m.brands).reduce((a, b) => a + b.fat, 0) + Object.values(m.items).reduce((a, b) => a + b.fat, 0);
         if (!totalFat) return null; // planilha do mês ainda vazia
-        return { key: f.key, fileName: f.name, modifiedTime: f.modifiedTime, provisional: m.emAndamento || f.key >= nowKey, channels: m.channels, brands: m.brands, items: m.items };
+        return { key: f.key, fileName: f.name, modifiedTime: f.modifiedTime, provisional: m.emAndamento || f.key >= nowKey, canaisEmAndamento: m.canaisEmAndamento, channels: m.channels, brands: m.brands, items: m.items };
       } catch (e) {
         errors.push({ month: f.key, fileName: f.name, error: String(e.message || e) });
         return null;
