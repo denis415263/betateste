@@ -204,10 +204,15 @@ const ITEM_TAG_STYLES = {
 };
 const ITEM_TAG_LABELS = { escalando: "Escalando", liquidacao: "Liquidação", inativo: "Inativo" };
 
+// Colunas congeladas (sticky) à esquerda: largura fixa + deslocamento acumulado
+function stickyCol(left, width) {
+  return { left, width, minWidth: width, maxWidth: width };
+}
+
 function ItemTagBadge({ tag }) {
   if (!tag) return null;
   return (
-    <span style={{ ...ITEM_TAG_STYLES[tag], padding: "1px 8px", borderRadius: 100, fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap" }}>
+    <span style={{ ...ITEM_TAG_STYLES[tag], padding: "1px 6px", borderRadius: 100, fontSize: 10, fontWeight: 600, whiteSpace: "nowrap" }}>
       {ITEM_TAG_LABELS[tag]}
     </span>
   );
@@ -2125,6 +2130,312 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
   );
 }
 
+// ====================== MARGEM DE CONTRIBUIÇÃO (MC) ======================
+// Dados vêm de /api/mc (função no Vercel que lê as planilhas mensais no Drive, só leitura).
+const MC_MONTH_NAMES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
+
+function mcNorm(s) {
+  return String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/[\s_.\-]+/g, "");
+}
+function mcMonthLabel(key, withYear) {
+  const [y, m] = key.split("-");
+  return MC_MONTH_NAMES[Number(m) - 1] + (withYear ? "/" + y.slice(2) : "");
+}
+function fmtPct(p) {
+  if (p === null || p === undefined || !isFinite(p)) return "—";
+  return (p * 100).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
+}
+function fmtCompactBRL(n) {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", notation: "compact", maximumFractionDigits: 1 }).format(n || 0);
+}
+
+let _mcPromise = null;
+function fetchMcData(force) {
+  if (!_mcPromise || force) {
+    _mcPromise = fetch("/api/mc", force ? { cache: "no-store" } : undefined).then(async (r) => {
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Erro ${r.status} ao buscar a MC`);
+      return j;
+    });
+    _mcPromise.catch(() => { _mcPromise = null; });
+  }
+  return _mcPromise;
+}
+
+function useMcData() {
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+  const load = useCallback((force) => {
+    setState((s) => ({ ...s, loading: true, error: null }));
+    fetchMcData(force)
+      .then((data) => setState({ loading: false, data, error: null }))
+      .catch((e) => setState({ loading: false, data: null, error: String(e.message || e) }));
+  }, []);
+  useEffect(() => { load(false); }, [load]);
+  return { ...state, reload: () => load(true) };
+}
+
+// Série mensal (últimos 12 meses disponíveis) a partir de um "pick" por mês
+function buildMcSeries(data, pick) {
+  if (!data || !data.months || !data.months.length) return [];
+  const months = data.months.slice(-12);
+  const multiYear = new Set(months.map((m) => m.key.slice(0, 4))).size > 1;
+  return months.map((m) => {
+    const r = pick(m);
+    const fat = (r && r.fat) || 0;
+    const mc = (r && r.mc) || 0;
+    return {
+      key: m.key, label: mcMonthLabel(m.key, multiYear), fullLabel: mcMonthLabel(m.key, true),
+      fat, mc, un: (r && r.un) || 0, pct: fat ? mc / fat : null,
+      provisional: !!m.provisional, ch: (r && r.ch) || {}, has: !!r,
+    };
+  });
+}
+
+function useElementWidth() {
+  const ref = React.useRef(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setWidth(el.clientWidth);
+    update();
+    if (typeof ResizeObserver === "undefined") { window.addEventListener("resize", update); return () => window.removeEventListener("resize", update); }
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, width];
+}
+
+// Dois painéis alinhados pelo mês: barras (R$) em cima, MC % embaixo.
+// Escalas separadas de propósito — nunca dois eixos no mesmo gráfico.
+function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
+  const [wrapRef, width] = useElementWidth();
+  const [hover, setHover] = useState(null);
+  const W = Math.max(width, 280);
+  const PAD = { left: 64, right: 44 };
+  const innerW = W - PAD.left - PAD.right;
+  const n = series.length;
+  const band = n ? innerW / n : innerW;
+  const cx = (i) => PAD.left + i * band + band / 2;
+
+  // Painel de barras
+  const BH = 132, BT = 18, BB = 8;
+  const bVals = series.map((s) => s[barKey] || 0);
+  let bMin = Math.min(0, ...bVals), bMax = Math.max(0, ...bVals);
+  if (bMax === bMin) bMax = bMin + 1;
+  const by = (v) => BT + (BH - BT - BB) * (1 - (v - bMin) / (bMax - bMin));
+  const bw = Math.max(6, Math.min(34, band * 0.56));
+  const barPath = (i, v) => {
+    const x0 = cx(i) - bw / 2, x1 = cx(i) + bw / 2;
+    const y0 = by(0), y1 = by(v);
+    const r = Math.min(4, Math.abs(y1 - y0), bw / 2);
+    if (Math.abs(y1 - y0) < 0.5) return "";
+    if (v >= 0) return `M${x0},${y0} L${x0},${y1 + r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 + r} L${x1},${y0} Z`;
+    return `M${x0},${y0} L${x0},${y1 - r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 - r} L${x1},${y0} Z`;
+  };
+
+  // Painel de MC %
+  const LH = 96, LT = 14, LB = 8;
+  const pVals = series.map((s) => s.pct).filter((p) => p !== null && isFinite(p));
+  let pMin = Math.min(0, ...(pVals.length ? pVals : [0]));
+  let pMax = Math.max(0.05, ...(pVals.length ? pVals : [0]));
+  const pPad = (pMax - pMin) * 0.12;
+  pMax += pPad; if (pMin < 0) pMin -= pPad;
+  const py = (p) => LT + (LH - LT - LB) * (1 - (p - pMin) / (pMax - pMin));
+  const segs = [];
+  let cur = [];
+  series.forEach((s, i) => {
+    if (s.pct === null || !isFinite(s.pct)) { if (cur.length) segs.push(cur); cur = []; return; }
+    cur.push([cx(i), py(s.pct), s.provisional]);
+  });
+  if (cur.length) segs.push(cur);
+  let lastIdx = -1;
+  series.forEach((s, i) => { if (s.pct !== null && isFinite(s.pct)) lastIdx = i; });
+
+  const h = hover !== null ? series[hover] : null;
+  const tipLeft = hover !== null && cx(hover) < W * 0.6;
+
+  function onMove(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const i = Math.floor((x - PAD.left) / band);
+    setHover(i >= 0 && i < n ? i : null);
+  }
+
+  const bandHighlight = (H) => hover !== null && <rect x={PAD.left + hover * band} y={0} width={band} height={H} fill="var(--ink)" opacity="0.045" />;
+
+  return (
+    <div ref={wrapRef} className="vivo-mc-panels" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+      {width > 0 && (<>
+        <div className="vivo-mc-panel-title">{barTitle}</div>
+        <svg width={W} height={BH} style={{ display: "block" }}>
+          {bandHighlight(BH)}
+          {[bMax, bMin < 0 ? bMin : null].filter((v) => v !== null && v !== 0).map((v) => (
+            <g key={v}>
+              <line x1={PAD.left} x2={W - PAD.right} y1={by(v)} y2={by(v)} stroke="var(--line)" strokeDasharray="3,3" />
+              <text x={PAD.left - 8} y={by(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtCompactBRL(v)}</text>
+            </g>
+          ))}
+          {series.map((s, i) => {
+            const v = s[barKey] || 0;
+            const col = v < 0 ? "var(--rust)" : "var(--olive-dark)";
+            return <path key={s.key} d={barPath(i, v)} fill={col} fillOpacity={s.provisional ? 0.35 : 1} stroke={s.provisional ? col : "none"} strokeDasharray={s.provisional ? "3,2" : undefined} />;
+          })}
+          <line x1={PAD.left} x2={W - PAD.right} y1={by(0)} y2={by(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
+          <text x={PAD.left - 8} y={by(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0</text>
+        </svg>
+        <div className="vivo-mc-panel-title" style={{ marginTop: 6 }}>MC %</div>
+        <svg width={W} height={LH} style={{ display: "block" }}>
+          {bandHighlight(LH)}
+          {[pMax - pPad, pMin < 0 ? pMin + pPad : null].filter((v) => v !== null).map((v, k) => (
+            <g key={k}>
+              <line x1={PAD.left} x2={W - PAD.right} y1={py(v)} y2={py(v)} stroke="var(--line)" strokeDasharray="3,3" />
+              <text x={PAD.left - 8} y={py(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtPct(v)}</text>
+            </g>
+          ))}
+          <line x1={PAD.left} x2={W - PAD.right} y1={py(0)} y2={py(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
+          <text x={PAD.left - 8} y={py(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0%</text>
+          {segs.map((seg, k) => seg.length > 1 && seg.slice(1).map((p, j) => (
+            <line key={`${k}-${j}`} x1={seg[j][0]} y1={seg[j][1]} x2={p[0]} y2={p[1]} stroke="var(--amber)" strokeWidth="2" strokeLinecap="round" strokeDasharray={p[2] ? "4,3" : undefined} />
+          )))}
+          {series.map((s, i) => (s.pct === null || !isFinite(s.pct)) ? null : (
+            <circle key={s.key} cx={cx(i)} cy={py(s.pct)} r={hover === i ? 5 : 4} fill={s.provisional ? "var(--card)" : "var(--amber)"} stroke={s.provisional ? "var(--amber)" : "var(--card)"} strokeWidth="2" />
+          ))}
+          {lastIdx >= 0 && hover === null && (
+            <text x={cx(lastIdx) + 8} y={py(series[lastIdx].pct) - 7} fontSize="10.5" fontWeight="600" fill="var(--ink)">{fmtPct(series[lastIdx].pct)}</text>
+          )}
+        </svg>
+        <svg width={W} height={20} style={{ display: "block" }}>
+          {series.map((s, i) => (
+            <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i ? 600 : 400} textAnchor="middle">{s.label}</text>
+          ))}
+        </svg>
+        {h && (
+          <div className="vivo-chart-tooltip" style={{ top: 20, left: tipLeft ? cx(hover) + band / 2 + 6 : "auto", right: tipLeft ? "auto" : W - cx(hover) + band / 2 + 6 }}>
+            <div className="vivo-chart-tooltip-date">{h.fullLabel}{h.provisional ? " · em andamento" : ""}</div>
+            {!h.has ? <div className="vivo-chart-tooltip-delta">Sem vendas no mês</div> : (<>
+              <div className="vivo-mc-tip-row"><span>Faturamento</span><b>{fmtCurrency(h.fat)}</b></div>
+              <div className="vivo-mc-tip-row"><span>MC R$</span><b style={{ color: h.mc < 0 ? "#f0a08a" : undefined }}>{fmtCurrency(h.mc)}</b></div>
+              <div className="vivo-mc-tip-row"><span>MC %</span><b>{fmtPct(h.pct)}</b></div>
+              {showUnits && <div className="vivo-mc-tip-row"><span>Unidades</span><b>{fmtNumber(h.un)}</b></div>}
+            </>)}
+          </div>
+        )}
+      </>)}
+    </div>
+  );
+}
+
+function McStatusLine({ loading, error, data, reload }) {
+  if (loading) return <div className="vivo-mc-note">Carregando margem de contribuição…</div>;
+  if (error) return (
+    <div className="vivo-mc-note vivo-mc-error">
+      Não foi possível carregar a MC: {error} <button className="vivo-btn" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 11 }} onClick={reload}>Tentar de novo</button>
+    </div>
+  );
+  return null;
+}
+
+// Seção da marca/fornecedor: gráfico + tabela mensal + quebra por canal
+function McBrandSection({ fornecedor, settings, persistSettings }) {
+  const { loading, data, error, reload } = useMcData();
+  const [openMonth, setOpenMonth] = useState(null);
+  const [linkChoice, setLinkChoice] = useState("");
+  const manualKey = settings?.mcBrandMap?.[fornecedor] || null;
+  const key = manualKey || mcNorm(fornecedor);
+
+  const series = useMemo(() => buildMcSeries(data, (m) => m.brands[key]), [data, key]);
+  const mcBrands = useMemo(() => {
+    const map = {};
+    for (const m of (data && data.months) || []) for (const [k, b] of Object.entries(m.brands)) map[k] = b.name;
+    return Object.entries(map).sort((a, b) => a[1].localeCompare(b[1], "pt-BR"));
+  }, [data]);
+  const found = series.some((s) => s.has);
+  const labels = (data && data.channelLabels) || {};
+
+  async function saveLink(value) {
+    if (!persistSettings) return;
+    const next = { ...(settings.mcBrandMap || {}) };
+    if (value) next[fornecedor] = value; else delete next[fornecedor];
+    await persistSettings({ ...settings, mcBrandMap: next });
+  }
+
+  return (
+    <div className="vivo-supplier-chart-block vivo-card vivo-mc-section">
+      <div className="vivo-mc-head">
+        <span className="vivo-capital-chart-label">Margem de contribuição — mês a mês</span>
+        {data && <span className="vivo-mc-note" style={{ margin: 0 }}>
+          {manualKey && <>Vinculada a “{(mcBrands.find(([k]) => k === manualKey) || [])[1] || manualKey}” · <a href="#" onClick={(e) => { e.preventDefault(); saveLink(null); }}>desfazer vínculo</a> · </>}
+          <a href="#" onClick={(e) => { e.preventDefault(); reload(); }}>atualizar</a>
+        </span>}
+      </div>
+      <McStatusLine loading={loading} error={error} data={data} reload={reload} />
+      {data && !found && (
+        <div className="vivo-mc-link">
+          <div style={{ marginBottom: 6 }}>Esta marca não foi encontrada nas planilhas de MC com o nome “{fornecedor}”. Se ela aparece lá com outro nome, escolha abaixo:</div>
+          <select className="vivo-select-tag" style={{ minWidth: 220 }} value={linkChoice} onChange={(e) => setLinkChoice(e.target.value)}>
+            <option value="">Selecione a marca na planilha…</option>
+            {mcBrands.map(([k, name]) => <option key={k} value={k}>{name}</option>)}
+          </select>
+          <button className="vivo-btn vivo-btn-primary" style={{ marginLeft: 8 }} disabled={!linkChoice || !persistSettings} onClick={() => saveLink(linkChoice)}>Vincular</button>
+        </div>
+      )}
+      {data && found && (<>
+        <McMonthlyPanels series={series} barKey="mc" barTitle="MC em R$" />
+        <table className="vivo-table vivo-table-compact vivo-mc-table">
+          <thead>
+            <tr><th>Mês</th><th className="num">Faturamento</th><th className="num">MC R$</th><th className="num">MC %</th><th></th></tr>
+          </thead>
+          <tbody>
+            {[...series].reverse().filter((s) => s.has).map((s) => (
+              <React.Fragment key={s.key}>
+                <tr className={"vivo-mc-row" + (s.provisional ? " is-provisional" : "")} onClick={() => setOpenMonth(openMonth === s.key ? null : s.key)} style={{ cursor: "pointer" }}>
+                  <td>{s.fullLabel}{s.provisional && <span className="vivo-mc-badge">em andamento</span>}</td>
+                  <td className="num mono">{fmtCurrency(s.fat)}</td>
+                  <td className={"num mono" + (s.mc < 0 ? " vivo-below-min" : "")}>{fmtCurrency(s.mc)}</td>
+                  <td className={"num mono" + (s.pct !== null && s.pct < 0 ? " vivo-below-min" : "")}>{fmtPct(s.pct)}</td>
+                  <td className="num" style={{ color: "var(--ink-soft)", fontSize: 11 }}>{openMonth === s.key ? "▲ canais" : "▼ canais"}</td>
+                </tr>
+                {openMonth === s.key && Object.entries(s.ch).sort((a, b) => b[1][0] - a[1][0]).map(([ck, [f, m]]) => (
+                  <tr key={ck} className="vivo-mc-subrow">
+                    <td style={{ paddingLeft: 22 }}>{labels[ck] || ck}</td>
+                    <td className="num mono">{fmtCurrency(f)}</td>
+                    <td className={"num mono" + (m < 0 ? " vivo-below-min" : "")}>{fmtCurrency(m)}</td>
+                    <td className="num mono">{fmtPct(f ? m / f : null)}</td>
+                    <td></td>
+                  </tr>
+                ))}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+        <div className="vivo-mc-note">
+          Fonte: planilhas “MARGEM CONTRIBUIÇÃO”, aba Dados (MC já descontada de ADS e devoluções). Meses com algum canal em andamento aparecem tracejados. Clique num mês para ver por canal.
+          {data.errors && data.errors.length > 0 && <span className="vivo-mc-error"> Não foi possível ler: {data.errors.map((e) => e.month).join(", ")}.</span>}
+        </div>
+      </>)}
+    </div>
+  );
+}
+
+// Bloco do item (painel do produto): faturamento + MC % mês a mês
+function McItemBlock({ codigo }) {
+  const { loading, data, error, reload } = useMcData();
+  const series = useMemo(() => buildMcSeries(data, (m) => m.items[String(codigo).toUpperCase()]), [data, codigo]);
+  const found = series.some((s) => s.has);
+  return (
+    <div className="vivo-drawer-chart-block">
+      <div className="vivo-mc-head">
+        <span className="vivo-capital-chart-label">Faturamento e MC — mês a mês</span>
+      </div>
+      <McStatusLine loading={loading} error={error} data={data} reload={reload} />
+      {data && !found && <div className="vivo-capital-chart-empty"><span>Sem vendas deste SKU nas planilhas de MC</span></div>}
+      {data && found && <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" showUnits />}
+    </div>
+  );
+}
+
 function SkuDrawer({ product, products, persistProducts, onClose }) {
   const [obsText, setObsText] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2194,6 +2505,7 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
               : <div className="vivo-capital-chart-empty"><span>Dados insuficientes para gráfico de capital excedente</span></div>
             }
           </div>
+          <McItemBlock codigo={product.codigo} />
           <div className="vivo-drawer-obs-section">
             <div className="vivo-capital-chart-label" style={{ marginBottom: 8 }}>Observações</div>
             <div className="vivo-drawer-obs-input-row">
@@ -2218,7 +2530,7 @@ function SkuDrawer({ product, products, persistProducts, onClose }) {
   );
 }
 
-function SupplierDetail({ fornecedor, products, settings, persistProducts, onBack }) {
+function SupplierDetail({ fornecedor, products, settings, persistProducts, persistSettings, onBack }) {
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState("desc");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -2352,6 +2664,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
         <div className="vivo-supplier-chart-block vivo-card">
           <MiniLineChart series={salesSeries} valueKey="total" color="#4a7c6f" unit="un" title={salesSeries.length >= 2 ? `Vendas 30D — ${fmtDateShort(salesSeries[0].ts)} a ${fmtDateShort(salesSeries[salesSeries.length-1].ts)}` : "Vendas 30D totais"} />
         </div>
+        {tag !== "inativo" && <McBrandSection fornecedor={fornecedor} settings={settings} persistSettings={persistSettings} />}
       </div>
 
       <div style={{ marginTop: 18 }}>
@@ -2395,9 +2708,9 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
           <table className="vivo-table vivo-table-compact">
             <thead>
               <tr>
-                <th style={{ width: itemColWidth, minWidth: itemColWidth, maxWidth: itemColWidth }}>Item</th>
-                <th>Tag</th>
-                <th className="mono">SKU</th>
+                <th className="vivo-sticky" style={stickyCol(0, itemColWidth)}>Item</th>
+                <th className="vivo-sticky" style={stickyCol(itemColWidth, 96)}>Tag</th>
+                <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(itemColWidth + 96, 64)}>SKU</th>
                 {showValidade && <th className="num" style={{ minWidth: 70 }}>Validade</th>}
                 {showValidade && <th className="num">Últ. Entrada <SortBtn col="ultimaEntrada" /></th>}
                 {showValidade && <th className="num">Vence em <SortBtn col="venceEm" /></th>}
@@ -2413,11 +2726,11 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
             <tbody>
               {skusSorted.map((p) => (
                 <tr key={p.codigo} className={drawerProduct?.codigo === p.codigo ? "is-selected" : ""} style={{ cursor: "pointer" }} onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}>
-                  <td style={{ width: itemColWidth, minWidth: itemColWidth, maxWidth: itemColWidth, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }} title={p.item}>{p.item}</td>
-                  <td onClick={(e) => e.stopPropagation()}>
+                  <td className="vivo-sticky" style={{ ...stickyCol(0, itemColWidth), fontWeight: 500 }} title={p.item}>{p.item}</td>
+                  <td className="vivo-sticky vivo-sticky-tag" style={stickyCol(itemColWidth, 96)} onClick={(e) => e.stopPropagation()}>
                     <ItemTagSelect product={p} products={products} persistProducts={persistProducts} />
                   </td>
-                  <td className="mono">{p.codigo}</td>
+                  <td className="mono vivo-sticky vivo-sticky-last" style={stickyCol(itemColWidth + 96, 64)} title={p.codigo}>{p.codigo}</td>
                   {showValidade && (() => {
                     const vs = getValidadeStatus(p);
                     return (<>
@@ -2870,10 +3183,10 @@ function OverviewTab({ products, persistProducts, settings }) {
         <table className="vivo-table vivo-table-compact">
           <thead>
             <tr>
-              <th>Item</th>
-              <th>Tag</th>
-              <th>Fornecedor <SortBtn col="fornecedor" /></th>
-              <th className="mono">SKU</th>
+              <th className="vivo-sticky" style={stickyCol(0, 200)}>Item</th>
+              <th className="vivo-sticky" style={stickyCol(200, 80)}>Tag</th>
+              <th className="vivo-sticky" style={stickyCol(280, 112)}>Fornecedor <SortBtn col="fornecedor" /></th>
+              <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(392, 64)}>SKU</th>
               <th className="num">Estoque <SortBtn col="estoque" /></th>
               <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
               <th className="num">Cobertura <SortBtn col="coverageDays" /></th>
@@ -2893,12 +3206,12 @@ function OverviewTab({ products, persistProducts, settings }) {
                 className={drawerProduct?.codigo === p.codigo ? "is-selected" : ""}
                 onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
               >
-                <td className="vivo-item-cell" title={p.item}>{p.item}</td>
-                <td style={{ width: 80, minWidth: 80 }}>
+                <td className="vivo-item-cell vivo-sticky" style={stickyCol(0, 200)} title={p.item}>{p.item}</td>
+                <td className="vivo-sticky" style={stickyCol(200, 80)}>
                   <ItemTagBadge tag={p.itemTag} />
                 </td>
-                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
-                <td className="mono">{p.codigo}</td>
+                <td className="vivo-sticky" style={stickyCol(280, 112)} title={p.fornecedor}>{p.fornecedor}</td>
+                <td className="mono vivo-sticky vivo-sticky-last" style={stickyCol(392, 64)} title={p.codigo}>{p.codigo}</td>
                 <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
                 <td className={"num mono" + (p.status === "critico" ? " vivo-below-min" : "")}>
@@ -3190,7 +3503,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
   if (suppliers.length === 0) return <div className="vivo-page"><EmptyState icon={Package} title="Nenhum fornecedor" text="Importe relatórios para que os fornecedores apareçam aqui." /></div>;
 
   if (selectedSupplier) {
-    return <SupplierDetail fornecedor={selectedSupplier} products={products} settings={settings} persistProducts={persistProducts} onBack={() => setSelectedSupplier(null)} />;
+    return <SupplierDetail fornecedor={selectedSupplier} products={products} settings={settings} persistProducts={persistProducts} persistSettings={persistSettings} onBack={() => setSelectedSupplier(null)} />;
   }
 
   return (
@@ -3792,6 +4105,21 @@ const VIVO_CSS = `
 .vivo-capital-chart-delta { font-size: 12px; font-family: 'JetBrains Mono', monospace; }
 .vivo-capital-chart-svg { width: 100%; height: 72px; display: block; }
 .vivo-chart-tooltip { position: absolute; background: var(--sidebar-bg); color: #fbf8f0; border-radius: 7px; padding: 7px 10px; font-size: 12px; pointer-events: none; white-space: nowrap; z-index: 10; box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
+/* Margem de contribuição */
+.vivo-mc-panels { position: relative; width: 100%; }
+.vivo-mc-panel-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-soft); font-weight: 600; margin: 4px 0 2px; }
+.vivo-mc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.vivo-mc-note { font-size: 11px; color: var(--ink-soft); margin-top: 8px; }
+.vivo-mc-note a { color: var(--olive-dark); }
+.vivo-mc-error { color: var(--rust); }
+.vivo-mc-link { font-size: 12px; color: var(--ink); background: var(--paper); border: 1px dashed var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 6px; }
+.vivo-mc-table { margin-top: 12px; }
+.vivo-mc-table tr.is-provisional td { color: var(--ink-soft); }
+.vivo-mc-table tr.vivo-mc-subrow td { background: var(--paper); font-size: 11px; }
+.vivo-mc-badge { margin-left: 6px; font-size: 9.5px; padding: 1px 6px; border-radius: 100px; background: var(--amber-soft); color: var(--amber); font-weight: 600; }
+.vivo-mc-tip-row { display: flex; justify-content: space-between; gap: 14px; font-size: 11.5px; line-height: 1.55; }
+.vivo-mc-tip-row span { color: #a39c8a; }
+.vivo-mc-tip-row b { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
 .vivo-chart-tooltip-date { font-size: 10.5px; color: #a39c8a; margin-bottom: 2px; }
 .vivo-chart-tooltip-value { font-weight: 600; font-size: 13px; font-family: 'JetBrains Mono', monospace; }
 .vivo-chart-tooltip-delta { font-size: 11px; margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
@@ -3802,6 +4130,14 @@ const VIVO_CSS = `
 .vivo-table-compact td { padding: 4px 7px; font-size: 11.5px; }
 .vivo-table-compact .vivo-select-tag { min-width: 100px; padding: 3px 5px; font-size: 11px; }
 .vivo-table-compact .vivo-item-cell { max-width: 180px; font-size: 11.5px; }
+/* Colunas congeladas à esquerda */
+.vivo-table .vivo-sticky { position: sticky; z-index: 1; background: var(--card); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vivo-table thead th.vivo-sticky { z-index: 3; }
+.vivo-table tbody tr:hover td.vivo-sticky { background: #fbf8f0; }
+.vivo-table tbody tr.is-low td.vivo-sticky { background: var(--rust-soft); }
+.vivo-table tbody tr.is-selected td.vivo-sticky { background: var(--amber-soft); }
+.vivo-table .vivo-sticky-last { box-shadow: inset -1px 0 0 var(--line), 6px 0 6px -6px rgba(0,0,0,0.18); }
+.vivo-table .vivo-sticky-tag .vivo-select-tag { min-width: 0; width: 100%; }
 .vivo-table-wrap-sticky { max-height: 70vh; overflow: auto; position: relative; }
 .vivo-table-wrap-sticky table thead th { position: sticky; top: 0; background: var(--card); z-index: 2; box-shadow: 0 1px 0 var(--line); }
 .vivo-capital-danger { color: var(--rust); font-weight: 600; }
