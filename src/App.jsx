@@ -2278,10 +2278,10 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
     if (statusFilter !== "all") list = list.filter((p) => p.status === statusFilter);
     if (sortCol) {
       list = [...list].sort((a, b) => {
-        // "Vence em": itens sem validade cadastrada ficam sempre no fim
-        if (sortCol === "venceEm") {
-          const na = a.venceEm === null || a.venceEm === undefined;
-          const nb = b.venceEm === null || b.venceEm === undefined;
+        // "Vence em" / "Últ. Entrada": itens sem dado ficam sempre no fim
+        if (sortCol === "venceEm" || sortCol === "ultimaEntrada") {
+          const na = a[sortCol] === null || a[sortCol] === undefined;
+          const nb = b[sortCol] === null || b[sortCol] === undefined;
           if (na && nb) return 0;
           if (na) return 1;
           if (nb) return -1;
@@ -2399,7 +2399,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, onBac
                 <th>Tag</th>
                 <th className="mono">SKU</th>
                 {showValidade && <th className="num" style={{ minWidth: 70 }}>Validade</th>}
-                {showValidade && <th className="num">Últ. Entrada</th>}
+                {showValidade && <th className="num">Últ. Entrada <SortBtn col="ultimaEntrada" /></th>}
                 {showValidade && <th className="num">Vence em <SortBtn col="venceEm" /></th>}
                 <th className="num">Estoque <SortBtn col="estoque" /></th>
                 <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
@@ -2744,10 +2744,10 @@ function OverviewTab({ products, persistProducts, settings }) {
       .filter((p) => p.itemTag !== "inativo") // inativos ocultos por padrão na visão geral
       .filter((p) => validadeFilter === "all" || p.validadeStatus.status === validadeFilter)
       .sort((a, b) => {
-        // "Vence em": itens sem validade cadastrada ficam sempre no fim
-        if (sortCol === "venceEm") {
-          const na = a.venceEm === null || a.venceEm === undefined;
-          const nb = b.venceEm === null || b.venceEm === undefined;
+        // "Vence em" / "Últ. Entrada": itens sem dado ficam sempre no fim
+        if (sortCol === "venceEm" || sortCol === "ultimaEntrada") {
+          const na = a[sortCol] === null || a[sortCol] === undefined;
+          const nb = b[sortCol] === null || b[sortCol] === undefined;
           if (na && nb) return 0;
           if (na) return 1;
           if (nb) return -1;
@@ -2881,6 +2881,7 @@ function OverviewTab({ products, persistProducts, settings }) {
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
               <th>Situação</th>
+              <th className="num">Últ. Entrada <SortBtn col="ultimaEntrada" /></th>
               <th className="num" title="Dias até o vencimento (última entrada + validade)">Vence em <SortBtn col="venceEm" /></th>
             </tr>
           </thead>
@@ -2915,6 +2916,7 @@ function OverviewTab({ products, persistProducts, settings }) {
                   {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
                   {p.status === "ok"      && <span className="vivo-badge vivo-badge-ok">OK</span>}
                 </td>
+                <td className="num mono" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{fmtBrDate(p.ultimaEntrada)}</td>
                 <td className="num" style={{ whiteSpace: "nowrap" }}>
                   {p.validadeStatus.status === "semDados" ? <span style={{ color: "#bbb", fontSize: 12 }}>—</span> : (
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}>
