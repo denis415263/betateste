@@ -1992,6 +1992,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
   const [skuDays, setSkuDays]   = useState({});
   const [drawerProduct, setDrawerProduct] = useState(null);
   useEffect(() => { setSkuDays({}); }, [generatedOrder]);
+  const mc = useMcData();
+  const mcRef = mcPickRefMonth(mc.data);
 
   async function saveCxMaster(codigo, value) {
     const val = value === "" ? null : Math.max(1, Number(value) || 1);
@@ -2002,6 +2004,12 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
   if (!generatedOrder) return <div className="vivo-page"><EmptyState icon={ShoppingCart} title="Nenhum pedido gerado" text="Vá em Fornecedores, defina a cobertura e clique em Gerar Pedido." /></div>;
 
   const { fornecedor, ts } = generatedOrder;
+  const mcMonth = mcRef.month;
+  const mcCanaisAndamento = mcMonth && mcMonth.provisional
+    ? ((mcMonth.canaisEmAndamento || []).map((k) => (mc.data.channelLabels || {})[k] || k).join(", ") || "algum canal")
+    : null;
+  const mcBrand = mcMonth ? mcMonth.brands[(settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor)] : null;
+  const mcItem = (codigo) => (mcMonth ? mcMonth.items[String(codigo).toUpperCase()] : null);
 
   const items = useMemo(() => {
     return Object.values(products)
@@ -2061,6 +2069,28 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
         </div>
         <button className="vivo-btn vivo-btn-secondary" onClick={exportToExcel} style={{ marginLeft: "auto" }}>Exportar Excel</button>
       </div>
+      <div className="vivo-mc-order-box vivo-card">
+        <div className="vivo-mc-order-title">Marca em {mcRef.label} <span>· planilha de margem de contribuição</span></div>
+        {mc.loading && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Carregando MC…</div>}
+        {mc.error && <div className="vivo-mc-note vivo-mc-error" style={{ marginTop: 0 }}>Não foi possível carregar a MC: {mc.error}</div>}
+        {mc.data && !mcMonth && <div className="vivo-mc-note" style={{ marginTop: 0 }}>A planilha de MC de {mcRef.label} ainda não tem dados.</div>}
+        {mc.data && mcMonth && !mcBrand && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Marca sem vendas em {mcRef.label} na planilha de MC (ou com nome diferente — vincule na tela do fornecedor).</div>}
+        {mcBrand && (
+          <div className="vivo-mc-order-kpis">
+            <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
+            <div><span>MC R$</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtCurrency(mcBrand.mc)}</strong></div>
+            <div><span>MC %</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtPct(mcBrand.fat ? mcBrand.mc / mcBrand.fat : null)}</strong></div>
+          </div>
+        )}
+        {mc.data && mcRef.nota && (
+          <div className="vivo-mc-order-warn">
+            <AlertTriangle size={13} /> {mcRef.nota}
+          </div>
+        )}
+        {mcCanaisAndamento && (
+          <div className="vivo-mc-note">Informativo: a planilha de {mcRef.label} ainda marca {mcCanaisAndamento} como “em andamento”.</div>
+        )}
+      </div>
       <div className="vivo-table-wrap vivo-card">
         <table className="vivo-table vivo-table-compact">
           <thead>
@@ -2076,6 +2106,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
               <th className="num">Qtd. Necessária</th>
               <th className="num">Custo Nota</th>
               <th className="num">Valor Compra</th>
+              <th className="num" title={`MC total do item em ${mcRef.label}, somando todos os canais (planilha de MC)`}>MC R$ {mcRef.label}</th>
+              <th className="num" title={`MC % do item em ${mcRef.label}`}>MC %</th>
             </tr>
           </thead>
           <tbody>
@@ -2112,6 +2144,15 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
                 </td>
                 <td className="num mono">{custoNota(p) ? fmtCurrency(custoNota(p)) : "—"}</td>
                 <td className={"num mono" + (p.valorCompra > 0 ? " vivo-value-positive" : "")}>{fmtCurrency(p.valorCompra)}</td>
+                {(() => {
+                  const mi = mcItem(p.codigo);
+                  if (!mi) return (<><td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td></>);
+                  const neg = mi.mc < 0;
+                  return (<>
+                    <td className={"num mono" + (neg ? " vivo-below-min" : "")}>{fmtCurrency(mi.mc)}</td>
+                    <td className={"num mono" + (neg ? " vivo-below-min" : "")}>{fmtPct(mi.fat ? mi.mc / mi.fat : null)}</td>
+                  </>);
+                })()}
               </tr>
             ))}
           </tbody>
@@ -2141,6 +2182,30 @@ function mcMonthLabel(key, withYear) {
   const [y, m] = key.split("-");
   return MC_MONTH_NAMES[Number(m) - 1] + (withYear ? "/" + y.slice(2) : "");
 }
+// Mês de referência da MC no Pedido Gerado:
+//   - até o dia MC_REF_DIA_SEGURO → mês retrasado (o anterior pode ainda não estar fechado)
+//   - depois disso → mês anterior; se a planilha dele ainda estiver vazia, volta ao retrasado
+// O status "em andamento" da planilha é só informativo (hoje não é atualizado com confiança).
+// Ajustar aqui quando o prazo de fechamento das planilhas for definido.
+const MC_REF_DIA_SEGURO = 10;
+function mcMonthKeyBack(now, back) {
+  const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function mcPickRefMonth(data, now = new Date()) {
+  const anterior = mcMonthKeyBack(now, 1), retrasado = mcMonthKeyBack(now, 2);
+  const find = (k) => ((data && data.months) || []).find((m) => m.key === k) || null;
+  let key = anterior, nota = null;
+  if (now.getDate() <= MC_REF_DIA_SEGURO) {
+    key = retrasado;
+    nota = `Até o dia ${MC_REF_DIA_SEGURO} usamos o mês retrasado, porque a MC de ${mcMonthLabel(anterior, true)} ainda pode não estar fechada.`;
+  } else if (data && !find(anterior)) {
+    key = retrasado;
+    nota = `A planilha de MC de ${mcMonthLabel(anterior, true)} ainda está vazia — mostrando ${mcMonthLabel(retrasado, true)}.`;
+  }
+  return { key, label: mcMonthLabel(key, true), month: find(key), nota };
+}
+
 function fmtPct(p) {
   if (p === null || p === undefined || !isFinite(p)) return "—";
   return (p * 100).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
@@ -4117,6 +4182,15 @@ const VIVO_CSS = `
 .vivo-mc-table tr.is-provisional td { color: var(--ink-soft); }
 .vivo-mc-table tr.vivo-mc-subrow td { background: var(--paper); font-size: 11px; }
 .vivo-mc-badge { margin-left: 6px; font-size: 9.5px; padding: 1px 6px; border-radius: 100px; background: var(--amber-soft); color: var(--amber); font-weight: 600; }
+.vivo-mc-order-box { padding: 12px 16px; margin-bottom: 14px; }
+.vivo-mc-order-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; color: var(--ink); margin-bottom: 8px; }
+.vivo-mc-order-title span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--ink-soft); }
+.vivo-mc-order-kpis { display: flex; gap: 32px; flex-wrap: wrap; }
+.vivo-mc-order-kpis div { display: flex; flex-direction: column; gap: 2px; }
+.vivo-mc-order-kpis span { font-size: 11px; color: var(--ink-soft); }
+.vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; color: var(--ink); }
+.vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
+.vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
 .vivo-mc-tip-row { display: flex; justify-content: space-between; gap: 14px; font-size: 11.5px; line-height: 1.55; }
 .vivo-mc-tip-row span { color: #a39c8a; }
 .vivo-mc-tip-row b { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
