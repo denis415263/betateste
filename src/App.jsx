@@ -2256,6 +2256,12 @@ function buildMcSeries(data, pick) {
   });
 }
 
+// Com pouco espaço, mostra só um mês a cada 2 ou 3 (sempre o mais recente e o do mouse)
+function mcShowMonthLabel(i, n, band, hover) {
+  const step = band < 18 ? 3 : band < 34 ? 2 : 1;
+  return hover === i || (n - 1 - i) % step === 0;
+}
+
 function useElementWidth() {
   const ref = React.useRef(null);
   const [width, setWidth] = useState(0);
@@ -2373,7 +2379,7 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
         </svg>
         <svg width={W} height={20} style={{ display: "block" }}>
           {series.map((s, i) => (
-            <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i ? 600 : 400} textAnchor="middle">{s.label}</text>
+            mcShowMonthLabel(i, n, band, hover) && <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i ? 600 : 400} textAnchor="middle">{s.label}</text>
           ))}
         </svg>
         {h && (
@@ -2388,6 +2394,169 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
           </div>
         )}
       </>)}
+    </div>
+  );
+}
+
+// Cor fixa por canal, na ordem de channelLabels (/api/mc) — a cor segue o canal, nunca a posição.
+// A ordem foi validada para daltonismo; amarelo, verde-água e rosa têm pouco contraste com o
+// fundo branco, por isso o gráfico sempre oferece a tabela.
+const MC_CHANNEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
+const MC_PCT_LIMIT = 1; // MC % além de ±100% (canal com venda mínima) fica no limite do gráfico
+
+// Uma linha por canal, mês a mês (MC % ou MC R$). Mesmo alinhamento de meses do McMonthlyPanels.
+function McChannelChart({ series, labels }) {
+  const [wrapRef, width] = useElementWidth();
+  const [hover, setHover] = useState(null);
+  const [metric, setMetric] = useState("pct");
+  const [hidden, setHidden] = useState({});
+  const [focus, setFocus] = useState(null);
+  const [showTable, setShowTable] = useState(false);
+
+  const order = Object.keys(labels || {});
+  const rank = (ck) => { const i = order.indexOf(ck); return i < 0 ? 99 : i; };
+  const colorOf = (ck) => MC_CHANNEL_COLORS[rank(ck)] || "var(--ink-soft)";
+  const nameOf = (ck) => (labels && labels[ck]) || ck;
+  const channels = useMemo(() => {
+    const set = new Set();
+    for (const s of series) for (const ck of Object.keys(s.ch)) set.add(ck);
+    return [...set].sort((a, b) => rank(a) - rank(b));
+  }, [series, labels]);
+  const visible = channels.filter((ck) => !hidden[ck]);
+
+  const valueOf = (s, ck, m = metric) => {
+    const c = s.ch[ck];
+    if (!c) return null;
+    const [f, mc] = c;
+    return m === "pct" ? (f ? mc / f : null) : mc;
+  };
+  const fmtVal = (v, m = metric) => (v === null ? "—" : m === "pct" ? fmtPct(v) : fmtCurrency(v));
+
+  const W = Math.max(width, 280);
+  const PAD = { left: 64, right: 44 };
+  const n = series.length;
+  const band = n ? (W - PAD.left - PAD.right) / n : 1;
+  const cx = (i) => PAD.left + i * band + band / 2;
+
+  const H = 170, T = 12, B = 8;
+  const vals = [];
+  for (const s of series) for (const ck of visible) { const v = valueOf(s, ck); if (v !== null && isFinite(v)) vals.push(v); }
+  let lo = Math.min(0, ...vals), hi = Math.max(metric === "pct" ? 0.05 : 1, ...vals);
+  if (metric === "pct") { lo = Math.max(lo, -MC_PCT_LIMIT); hi = Math.min(hi, MC_PCT_LIMIT); }
+  const clipped = metric === "pct" && vals.some((v) => Math.abs(v) > MC_PCT_LIMIT);
+  const top = hi, bottom = lo;
+  const pad = (hi - lo) * 0.08;
+  hi += pad; if (lo < 0) lo -= pad;
+  const y = (v) => T + (H - T - B) * (1 - (Math.min(Math.max(v, bottom), top) - lo) / (hi - lo));
+  const fmtAxis = (v) => (metric === "pct" ? fmtPct(v) : fmtCompactBRL(v));
+
+  function onMove(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const i = Math.floor((e.clientX - rect.left - PAD.left) / band);
+    setHover(i >= 0 && i < n ? i : null);
+  }
+
+  const h = hover !== null ? series[hover] : null;
+  const tipLeft = hover !== null && cx(hover) < W * 0.6;
+  const tipRows = h ? visible.filter((ck) => h.ch[ck]).sort((a, b) => (valueOf(h, b) ?? -Infinity) - (valueOf(h, a) ?? -Infinity)) : [];
+  const fade = (ck) => (focus && focus !== ck ? 0.18 : 1);
+
+  if (!channels.length) return null;
+
+  return (
+    <div className="vivo-mc-channels">
+      <div className="vivo-mc-ch-toolbar">
+        <span className="vivo-mc-panel-title" style={{ margin: 0 }}>MC por canal de venda</span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="vivo-mc-seg">
+            <button className={metric === "pct" ? "is-active" : ""} onClick={() => setMetric("pct")}>MC %</button>
+            <button className={metric === "mc" ? "is-active" : ""} onClick={() => setMetric("mc")}>MC R$</button>
+          </div>
+          <div className="vivo-mc-seg">
+            <button className={showTable ? "is-active" : ""} onClick={() => setShowTable(!showTable)}>Tabela</button>
+          </div>
+        </div>
+      </div>
+      <div className="vivo-mc-legend">
+        {channels.map((ck) => (
+          <button key={ck} className={hidden[ck] ? "is-off" : ""} title={hidden[ck] ? "Mostrar canal" : "Ocultar canal"}
+            onClick={() => setHidden({ ...hidden, [ck]: !hidden[ck] })}
+            onMouseEnter={() => !hidden[ck] && setFocus(ck)} onMouseLeave={() => setFocus(null)}>
+            <span className="vivo-mc-swatch" style={{ background: colorOf(ck) }} />{nameOf(ck)}
+          </button>
+        ))}
+      </div>
+      <div ref={wrapRef} className="vivo-mc-panels" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        {width > 0 && (<>
+          <svg width={W} height={H} style={{ display: "block" }}>
+            {hover !== null && <rect x={PAD.left + hover * band} y={0} width={band} height={H} fill="var(--ink)" opacity="0.045" />}
+            {[top, bottom < 0 ? bottom : null].filter((v) => v !== null && v !== 0 && Math.abs(y(v) - y(0)) > 12).map((v, k) => (
+              <g key={k}>
+                <line x1={PAD.left} x2={W - PAD.right} y1={y(v)} y2={y(v)} stroke="var(--line)" strokeDasharray="3,3" />
+                <text x={PAD.left - 8} y={y(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtAxis(v)}</text>
+              </g>
+            ))}
+            <line x1={PAD.left} x2={W - PAD.right} y1={y(0)} y2={y(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
+            <text x={PAD.left - 8} y={y(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{metric === "pct" ? "0%" : "0"}</text>
+            {visible.map((ck) => (
+              <g key={ck} opacity={fade(ck)}>
+                {series.map((s, i) => {
+                  if (i === 0) return null;
+                  const a = valueOf(series[i - 1], ck), b = valueOf(s, ck);
+                  if (a === null || b === null) return null;
+                  return <line key={s.key} x1={cx(i - 1)} y1={y(a)} x2={cx(i)} y2={y(b)} stroke={colorOf(ck)} strokeWidth="2" strokeLinecap="round" strokeDasharray={s.provisional ? "4,3" : undefined} />;
+                })}
+                {series.map((s, i) => {
+                  const v = valueOf(s, ck);
+                  if (v === null) return null;
+                  return <circle key={s.key} cx={cx(i)} cy={y(v)} r={hover === i ? 4.5 : 3.5} fill={s.provisional ? "var(--card)" : colorOf(ck)} stroke={s.provisional ? colorOf(ck) : "var(--card)"} strokeWidth={s.provisional ? 2 : 1.5} />;
+                })}
+              </g>
+            ))}
+          </svg>
+          <svg width={W} height={20} style={{ display: "block" }}>
+            {series.map((s, i) => (
+              mcShowMonthLabel(i, n, band, hover) && <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i ? 600 : 400} textAnchor="middle">{s.label}</text>
+            ))}
+          </svg>
+          {h && (
+            <div className="vivo-chart-tooltip" style={{ top: 10, left: tipLeft ? cx(hover) + band / 2 + 6 : "auto", right: tipLeft ? "auto" : W - cx(hover) + band / 2 + 6 }}>
+              <div className="vivo-chart-tooltip-date">{h.fullLabel}{h.provisional ? " · em andamento" : ""}</div>
+              {!tipRows.length ? <div className="vivo-chart-tooltip-delta">Sem vendas no mês</div> : (
+                <div className="vivo-mc-tip-ch">
+                  <span /><em>MC %</em><em>MC R$</em>
+                  {tipRows.map((ck) => (
+                    <React.Fragment key={ck}>
+                      <span><i className="vivo-mc-swatch" style={{ background: colorOf(ck) }} />{nameOf(ck)}</span>
+                      <b>{fmtVal(valueOf(h, ck, "pct"), "pct")}</b>
+                      <b style={{ color: h.ch[ck][1] < 0 ? "#f0a08a" : undefined }}>{fmtVal(valueOf(h, ck, "mc"), "mc")}</b>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </>)}
+      </div>
+      {clipped && <div className="vivo-mc-note" style={{ marginTop: 2 }}>Meses com MC além de ±100% (canal com venda muito pequena) aparecem no limite do gráfico — passe o mouse para ver o valor real.</div>}
+      {showTable && (
+        <table className="vivo-table vivo-table-compact vivo-mc-table">
+          <thead>
+            <tr><th>Mês</th>{visible.map((ck) => <th key={ck} className="num">{nameOf(ck)}</th>)}</tr>
+          </thead>
+          <tbody>
+            {[...series].reverse().filter((s) => visible.some((ck) => s.ch[ck])).map((s) => (
+              <tr key={s.key} className={s.provisional ? "is-provisional" : ""}>
+                <td>{s.fullLabel}</td>
+                {visible.map((ck) => {
+                  const v = valueOf(s, ck);
+                  return <td key={ck} className={"num mono" + (v !== null && v < 0 ? " vivo-below-min" : "")}>{s.ch[ck] ? fmtVal(v) : ""}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
@@ -2447,7 +2616,8 @@ function McBrandSection({ fornecedor, settings, persistSettings }) {
         </div>
       )}
       {data && found && (<>
-        <McMonthlyPanels series={series} barKey="mc" barTitle="MC em R$" />
+        <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" />
+        <McChannelChart series={series} labels={labels} />
         <table className="vivo-table vivo-table-compact vivo-mc-table">
           <thead>
             <tr><th>Mês</th><th className="num">Faturamento</th><th className="num">MC R$</th><th className="num">MC %</th><th></th></tr>
@@ -2476,7 +2646,7 @@ function McBrandSection({ fornecedor, settings, persistSettings }) {
           </tbody>
         </table>
         <div className="vivo-mc-note">
-          Fonte: planilhas “MARGEM CONTRIBUIÇÃO”, aba Dados (MC já descontada de ADS e devoluções). Meses com algum canal em andamento aparecem tracejados. Clique num mês para ver por canal.
+          Fonte: planilhas “MARGEM CONTRIBUIÇÃO”, aba Dados (MC já descontada de ADS e devoluções). Meses com algum canal em andamento aparecem tracejados. Clique num mês para ver por canal. A MC por canal vem das colunas de cada canal e pode não somar exatamente a MC total, que já desconta as devoluções.
           {data.errors && data.errors.length > 0 && <span className="vivo-mc-error"> Não foi possível ler: {data.errors.map((e) => e.month).join(", ")}.</span>}
         </div>
       </>)}
@@ -2496,7 +2666,10 @@ function McItemBlock({ codigo }) {
       </div>
       <McStatusLine loading={loading} error={error} data={data} reload={reload} />
       {data && !found && <div className="vivo-capital-chart-empty"><span>Sem vendas deste SKU nas planilhas de MC</span></div>}
-      {data && found && <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" showUnits />}
+      {data && found && (<>
+        <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" showUnits />
+        <McChannelChart series={series} labels={data.channelLabels} />
+      </>)}
     </div>
   );
 }
@@ -4191,6 +4364,21 @@ const VIVO_CSS = `
 .vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; color: var(--ink); }
 .vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
 .vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
+.vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.vivo-mc-seg button { font: inherit; font-size: 11px; padding: 3px 9px; background: var(--card); color: var(--ink-soft); border: 0; cursor: pointer; }
+.vivo-mc-seg button + button { border-left: 1px solid var(--line); }
+.vivo-mc-seg button.is-active { background: var(--ink); color: var(--paper); }
+.vivo-mc-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 4px; }
+.vivo-mc-legend button { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 11.5px; color: var(--ink); background: none; border: 0; padding: 2px 0; cursor: pointer; }
+.vivo-mc-legend button.is-off { opacity: 0.4; text-decoration: line-through; }
+.vivo-mc-swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.vivo-mc-legend .vivo-mc-swatch { margin-right: 0; }
+.vivo-mc-tip-ch { display: grid; grid-template-columns: auto auto auto; gap: 1px 14px; font-size: 11.5px; line-height: 1.55; align-items: center; }
+.vivo-mc-tip-ch em { font-style: normal; font-size: 10px; color: #a39c8a; text-align: right; }
+.vivo-mc-tip-ch span { color: #e6e0d0; }
+.vivo-mc-tip-ch b { font-family: 'JetBrains Mono', monospace; font-weight: 500; text-align: right; }
 .vivo-mc-tip-row { display: flex; justify-content: space-between; gap: 14px; font-size: 11.5px; line-height: 1.55; }
 .vivo-mc-tip-row span { color: #a39c8a; }
 .vivo-mc-tip-row b { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
