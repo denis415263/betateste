@@ -2278,11 +2278,12 @@ function useElementWidth() {
   return [ref, width];
 }
 
-// Dois painéis alinhados pelo mês: barras (R$) em cima, MC % embaixo.
+// Dois painéis alinhados pelo mês: barras (R$) em cima, MC embaixo (R$ por padrão, opcional em %).
 // Escalas separadas de propósito — nunca dois eixos no mesmo gráfico.
 function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
   const [wrapRef, width] = useElementWidth();
   const [hover, setHover] = useState(null);
+  const [metric, setMetric] = useState("mc");
   const W = Math.max(width, 280);
   const PAD = { left: 64, right: 44 };
   const innerW = W - PAD.left - PAD.right;
@@ -2306,23 +2307,30 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
     return `M${x0},${y0} L${x0},${y1 - r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 - r} L${x1},${y0} Z`;
   };
 
-  // Painel de MC %
+  // Painel de MC (R$ ou %)
   const LH = 96, LT = 14, LB = 8;
-  const pVals = series.map((s) => s.pct).filter((p) => p !== null && isFinite(p));
+  const mcv = (s) => metric === "pct"
+    ? (s.pct !== null && isFinite(s.pct) ? s.pct : null)
+    : (s.has && isFinite(s.mc) ? s.mc : null);
+  const fmtLine = metric === "pct" ? fmtPct : fmtCompactBRL;
+  const pVals = series.map(mcv).filter((p) => p !== null);
   let pMin = Math.min(0, ...(pVals.length ? pVals : [0]));
-  let pMax = Math.max(0.05, ...(pVals.length ? pVals : [0]));
+  let pMax = Math.max(metric === "pct" ? 0.05 : 1, ...(pVals.length ? pVals : [0]));
   const pPad = (pMax - pMin) * 0.12;
   pMax += pPad; if (pMin < 0) pMin -= pPad;
   const py = (p) => LT + (LH - LT - LB) * (1 - (p - pMin) / (pMax - pMin));
   const segs = [];
   let cur = [];
   series.forEach((s, i) => {
-    if (s.pct === null || !isFinite(s.pct)) { if (cur.length) segs.push(cur); cur = []; return; }
-    cur.push([cx(i), py(s.pct), s.provisional]);
+    if (mcv(s) === null) { if (cur.length) segs.push(cur); cur = []; return; }
+    cur.push([cx(i), py(mcv(s)), s.provisional]);
   });
   if (cur.length) segs.push(cur);
   let lastIdx = -1;
-  series.forEach((s, i) => { if (s.pct !== null && isFinite(s.pct)) lastIdx = i; });
+  series.forEach((s, i) => { if (mcv(s) !== null) lastIdx = i; });
+  // Rótulo do último mês fica do lado oposto ao da linha que chega nele
+  const prevMc = lastIdx > 0 ? mcv(series[lastIdx - 1]) : null;
+  const lastBelow = lastIdx >= 0 && prevMc !== null && prevMc > mcv(series[lastIdx]) && py(mcv(series[lastIdx])) < LH - 20;
 
   const h = hover !== null ? series[hover] : null;
   const tipLeft = hover !== null && cx(hover) < W * 0.6;
@@ -2356,25 +2364,31 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
           <line x1={PAD.left} x2={W - PAD.right} y1={by(0)} y2={by(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
           <text x={PAD.left - 8} y={by(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0</text>
         </svg>
-        <div className="vivo-mc-panel-title" style={{ marginTop: 6 }}>MC %</div>
+        <div className="vivo-mc-line-head">
+          <span className="vivo-mc-panel-title" style={{ margin: 0 }}>{metric === "pct" ? "MC %" : "MC R$"}</span>
+          <div className="vivo-mc-seg">
+            <button className={metric === "mc" ? "is-active" : ""} onClick={() => setMetric("mc")}>MC R$</button>
+            <button className={metric === "pct" ? "is-active" : ""} onClick={() => setMetric("pct")}>MC %</button>
+          </div>
+        </div>
         <svg width={W} height={LH} style={{ display: "block" }}>
           {bandHighlight(LH)}
-          {[pMax - pPad, pMin < 0 ? pMin + pPad : null].filter((v) => v !== null).map((v, k) => (
+          {[pMax - pPad, pMin < 0 ? pMin + pPad : null].filter((v) => v !== null && v !== 0).map((v, k) => (
             <g key={k}>
               <line x1={PAD.left} x2={W - PAD.right} y1={py(v)} y2={py(v)} stroke="var(--line)" strokeDasharray="3,3" />
-              <text x={PAD.left - 8} y={py(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtPct(v)}</text>
+              <text x={PAD.left - 8} y={py(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtLine(v)}</text>
             </g>
           ))}
           <line x1={PAD.left} x2={W - PAD.right} y1={py(0)} y2={py(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
-          <text x={PAD.left - 8} y={py(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0%</text>
+          <text x={PAD.left - 8} y={py(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{metric === "pct" ? "0%" : "0"}</text>
           {segs.map((seg, k) => seg.length > 1 && seg.slice(1).map((p, j) => (
             <line key={`${k}-${j}`} x1={seg[j][0]} y1={seg[j][1]} x2={p[0]} y2={p[1]} stroke="var(--amber)" strokeWidth="2" strokeLinecap="round" strokeDasharray={p[2] ? "4,3" : undefined} />
           )))}
-          {series.map((s, i) => (s.pct === null || !isFinite(s.pct)) ? null : (
-            <circle key={s.key} cx={cx(i)} cy={py(s.pct)} r={hover === i ? 5 : 4} fill={s.provisional ? "var(--card)" : "var(--amber)"} stroke={s.provisional ? "var(--amber)" : "var(--card)"} strokeWidth="2" />
+          {series.map((s, i) => mcv(s) === null ? null : (
+            <circle key={s.key} cx={cx(i)} cy={py(mcv(s))} r={hover === i ? 5 : 4} fill={s.provisional ? "var(--card)" : "var(--amber)"} stroke={s.provisional ? "var(--amber)" : "var(--card)"} strokeWidth="2" />
           ))}
           {lastIdx >= 0 && hover === null && (
-            <text x={cx(lastIdx) + 8} y={py(series[lastIdx].pct) - 7} fontSize="10.5" fontWeight="600" fill="var(--ink)">{fmtPct(series[lastIdx].pct)}</text>
+            <text x={cx(lastIdx) + 6} y={py(mcv(series[lastIdx])) + (lastBelow ? 17 : -9)} fontSize="10.5" fontWeight="600" fill="var(--ink)" textAnchor="end">{fmtLine(mcv(series[lastIdx]))}</text>
           )}
         </svg>
         <svg width={W} height={20} style={{ display: "block" }}>
@@ -2404,11 +2418,11 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
 const MC_CHANNEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
 const MC_PCT_LIMIT = 1; // MC % além de ±100% (canal com venda mínima) fica no limite do gráfico
 
-// Uma linha por canal, mês a mês (MC % ou MC R$). Mesmo alinhamento de meses do McMonthlyPanels.
+// Uma linha por canal, mês a mês (MC R$ ou MC %). Mesmo alinhamento de meses do McMonthlyPanels.
 function McChannelChart({ series, labels }) {
   const [wrapRef, width] = useElementWidth();
   const [hover, setHover] = useState(null);
-  const [metric, setMetric] = useState("pct");
+  const [metric, setMetric] = useState("mc");
   const [hidden, setHidden] = useState({});
   const [focus, setFocus] = useState(null);
   const [showTable, setShowTable] = useState(false);
@@ -2469,8 +2483,8 @@ function McChannelChart({ series, labels }) {
         <span className="vivo-mc-panel-title" style={{ margin: 0 }}>MC por canal de venda</span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <div className="vivo-mc-seg">
-            <button className={metric === "pct" ? "is-active" : ""} onClick={() => setMetric("pct")}>MC %</button>
             <button className={metric === "mc" ? "is-active" : ""} onClick={() => setMetric("mc")}>MC R$</button>
+            <button className={metric === "pct" ? "is-active" : ""} onClick={() => setMetric("pct")}>MC %</button>
           </div>
           <div className="vivo-mc-seg">
             <button className={showTable ? "is-active" : ""} onClick={() => setShowTable(!showTable)}>Tabela</button>
@@ -4364,6 +4378,7 @@ const VIVO_CSS = `
 .vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; color: var(--ink); }
 .vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
 .vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
+.vivo-mc-line-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 2px; }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
