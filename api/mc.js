@@ -1,22 +1,18 @@
 // Vívora — leitura da Margem de Contribuição (MC) nas planilhas mensais do Google Drive.
 //
-// Roda como função do Vercel (rota /api/mc). Usa a conta de serviço guardada na
-// variável de ambiente GOOGLE_SERVICE_ACCOUNT_JSON e pede ao Google SOMENTE escopos
-// de leitura — mesmo que a conta tenha permissão maior por engano, esta função não
-// consegue alterar nenhuma planilha.
+// Roda como função do Vercel (rota /api/mc). A autenticação no Google (conta de
+// serviço, só leitura) fica em _google.js.
 //
 // Para cada planilha "AAAA.MM MARGEM CONTRIBUIÇÃO" da pasta:
 //   - aba "Dados"        → MC por marca (fabricante), por canal + total oficial
 //   - aba "Dados Itens"  → MC por SKU, por canal
+// E da planilha mais recente que tiver a aba "Carteira": fornecedores de cada carteira
+// comercial (A e B; a lista AB, compartilhada, fica fora das duas no app).
 // As colunas são localizadas pelo NOME do cabeçalho (a posição muda entre os meses).
 
-const crypto = require("crypto");
+const { getAccessToken, gget, allowOrigin, sendJson } = require("./_google");
 
 const DEFAULT_FOLDER_ID = "1zOwKTPabTqqIIE6_Wu18cGD1hP2UCpPC";
-const SCOPES = [
-  "https://www.googleapis.com/auth/drive.readonly",
-  "https://www.googleapis.com/auth/spreadsheets.readonly",
-].join(" ");
 
 // Canais conhecidos — nomes diferentes entre meses apontam para o mesmo canal
 const CHANNELS = [
@@ -158,40 +154,29 @@ function parseMonth(dadosRows, itensRows) {
   };
 }
 
-// ── Google: autenticação e leitura ──────────────────────────────────────────
-function b64url(input) {
-  return Buffer.from(input).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+// ── aba "Carteira" ──────────────────────────────────────────────────────────
+// Linha 1 tem os títulos "Carteira A", "Carteira B" e "AB"; abaixo de cada um, os
+// fornecedores (a coluna ao lado traz a MC, ignorada). A lista AB termina na primeira
+// célula vazia — mais abaixo, na mesma coluna, vêm totais.
+function parseCarteira(rows) {
+  rows = rows || [];
+  const head = rows[0] || [];
+  const colOf = (label) => head.findIndex((c) => norm(c) === label);
+  const cols = { A: colOf("CARTEIRAA"), B: colOf("CARTEIRAB"), AB: colOf("AB") };
+  if (cols.A < 0 && cols.B < 0) throw new Error("títulos Carteira A / Carteira B não encontrados");
+  const out = { A: [], B: [], AB: [] };
+  for (const [k, c] of Object.entries(cols)) {
+    if (c < 0) continue;
+    for (let r = 1; r < rows.length; r++) {
+      const v = String((rows[r] || [])[c] ?? "").trim();
+      if (!v) { if (k === "AB") break; continue; }
+      out[k].push(v);
+    }
+  }
+  return out;
 }
 
-let tokenCache = { token: null, exp: 0 };
-async function getAccessToken() {
-  if (tokenCache.token && Date.now() < tokenCache.exp - 60000) return tokenCache.token;
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) throw new Error("Variável GOOGLE_SERVICE_ACCOUNT_JSON não configurada no Vercel.");
-  const sa = JSON.parse(raw);
-  const key = String(sa.private_key || "").replace(/\\n/g, "\n");
-  const now = Math.floor(Date.now() / 1000);
-  const head = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claim = b64url(JSON.stringify({ iss: sa.client_email, scope: SCOPES, aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 }));
-  const sig = crypto.createSign("RSA-SHA256").update(`${head}.${claim}`).sign(key);
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${head}.${claim}.${b64url(sig)}` }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error("Falha ao autenticar no Google: " + (data.error_description || data.error || res.status));
-  tokenCache = { token: data.access_token, exp: Date.now() + (data.expires_in || 3600) * 1000 };
-  return tokenCache.token;
-}
-
-async function gget(url, token) {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
-  return data;
-}
-
+// ── Google: leitura ─────────────────────────────────────────────────────────
 async function listMonthFiles(folderId, token) {
   const q = `'${folderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`;
   const url = "https://www.googleapis.com/drive/v3/files?" + new URLSearchParams({
@@ -225,23 +210,33 @@ async function readMonth(file, token) {
 // Cache por instância: só relê o mês cuja planilha mudou
 const monthCache = {};
 
-async function handler(req, res) {
-  // Só responde para o próprio site (bloqueia acesso direto pelo endereço)
-  const host = req.headers.host || "";
-  const ref = req.headers.origin || req.headers.referer || "";
-  let refHost = "";
-  try { refHost = new URL(ref).host; } catch (e) { /* sem referer */ }
-  if (!refHost || refHost !== host) {
-    res.statusCode = 403;
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.end(JSON.stringify({ error: "Acesso não permitido." }));
+// Carteiras: tenta as 3 planilhas mais recentes até achar uma aba "Carteira" preenchida
+async function readCarteira(files, token) {
+  for (const f of files.slice(-3).reverse()) {
+    const ck = `carteira:${f.id}:${f.modifiedTime}`;
+    if (monthCache[ck] === undefined) {
+      try {
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${f.id}/values/${encodeURIComponent("Carteira!A1:K300")}`;
+        const c = parseCarteira((await gget(url, token)).values);
+        monthCache[ck] = c.A.length + c.B.length + c.AB.length ? { month: f.key, fileName: f.name, ...c } : null;
+      } catch (e) {
+        monthCache[ck] = null; // mês sem a aba (ou fora do padrão) — tenta o anterior
+      }
+    }
+    if (monthCache[ck]) return monthCache[ck];
   }
+  return null;
+}
+
+async function handler(req, res) {
+  if (!allowOrigin(req, res)) return;
 
   try {
     const token = await getAccessToken();
     const files = await listMonthFiles(process.env.MC_FOLDER_ID || DEFAULT_FOLDER_ID, token);
     const nowKey = new Date().toISOString().slice(0, 7);
     const errors = [];
+    const carteirasPromise = readCarteira(files, token);
     const months = await Promise.all(files.map(async (f) => {
       const ck = `${f.id}:${f.modifiedTime}`;
       try {
@@ -259,19 +254,16 @@ async function handler(req, res) {
       generatedAt: new Date().toISOString(),
       channelLabels: Object.fromEntries(CHANNELS.map((c) => [c.key, c.label])),
       months: months.filter(Boolean),
+      carteiras: await carteirasPromise,
       errors,
     };
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setHeader("Cache-Control", "private, max-age=600");
-    res.end(JSON.stringify(body));
+    sendJson(res, 200, body, "private, max-age=600");
   } catch (e) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(JSON.stringify({ error: String(e.message || e) }));
+    sendJson(res, 500, { error: String(e.message || e) });
   }
 }
 
 module.exports = handler;
 module.exports.parseMonth = parseMonth;
 module.exports.parseSheet = parseSheet;
+module.exports.parseCarteira = parseCarteira;

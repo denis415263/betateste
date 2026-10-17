@@ -693,7 +693,7 @@ export default function App() {
           />
         )}
         {mainTab === "relatorios" && subTab === "prices" && (
-          <PriceTableTab products={products} persistProducts={persistProducts} />
+          <PriceTableTab products={products} persistProducts={persistProducts} settings={settings} persistSettings={persistSettings} />
         )}
         {mainTab === "relatorios" && subTab === "history" && (
           <HistoryTab history={history} persistHistory={persistHistory} />
@@ -712,6 +712,9 @@ export default function App() {
         )}
         {mainTab === "compras" && subTab === "overview" && (
           <OverviewTab products={products} persistProducts={persistProducts} settings={settings} />
+        )}
+        {mainTab === "compras" && (subTab === "overview-a" || subTab === "overview-b") && (
+          <CarteiraOverviewTab key={subTab} carteira={subTab === "overview-a" ? "A" : "B"} products={products} persistProducts={persistProducts} settings={settings} />
         )}
         {mainTab === "compras" && subTab === "brands" && (
           <BrandsTab
@@ -760,6 +763,8 @@ const NAV_STRUCTURE = [
     icon: ShoppingCart,
     subItems: [
       { id: "overview", label: "Visão Geral" },
+      { id: "overview-a", label: "Carteira A", parent: "overview" },
+      { id: "overview-b", label: "Carteira B", parent: "overview" },
       { id: "brands", label: "Visão Marcas" },
       { id: "suppliers", label: "Compras" },
       { id: "generated-order", label: "Pedido Gerado" },
@@ -828,11 +833,13 @@ function TopNav({ mainTab, subTab, goTo, monitoredCount }) {
             {mainTab === m.id && (
               <div className="vivo-sidebar-sub">
                 {m.subItems.map((s) => {
+                  // Subitens aninhados (ex.: carteiras) só aparecem com o item pai aberto
+                  if (s.parent && subTab !== s.parent && !subTab.startsWith(s.parent + "-")) return null;
                   const count = countFor(s.id);
                   return (
                     <button
                       key={s.id}
-                      className={"vivo-sidebar-sub-btn" + (subTab === s.id ? " is-active" : "")}
+                      className={"vivo-sidebar-sub-btn" + (s.parent ? " is-nested" : "") + (subTab === s.id ? " is-active" : "")}
                       onClick={() => goTo(m.id, s.id)}
                     >
                       {s.label}
@@ -853,10 +860,43 @@ function TopNav({ mainTab, subTab, goTo, monitoredCount }) {
   );
 }
 
-function PriceTableTab({ products, persistProducts }) {
+function PriceTableTab({ products, persistProducts, settings, persistSettings }) {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(null);
+  const lastSync = settings?.produtosSync || null;
+
+  // Lê a tabela de produtos no Google Sheets (/api/produtos) e aplica os mesmos campos
+  // do upload da Pasta1.xlsx.
+  async function syncFromSheets() {
+    setSyncing(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const r = await fetch("/api/produtos", { cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Erro ${r.status}`);
+      const next = { ...products };
+      let updated = 0;
+      for (const codigo of Object.keys(next)) {
+        const row = j.rows[codigo];
+        if (!row) continue;
+        const { fabricante, ...custos } = row;
+        next[codigo] = { ...next[codigo], ...custos };
+        updated++;
+      }
+      const notFound = Object.keys(j.rows).filter((sku) => !products[sku]).length;
+      await persistProducts(next);
+      const info = { ts: Date.now(), updated, notFound, totalTabela: j.total };
+      if (persistSettings) await persistSettings({ ...settings, produtosSync: info });
+      setStatus({ ...info, source: "sheets", missingColumns: j.missingColumns || [] });
+    } catch (err) {
+      setError("Não foi possível sincronizar com a planilha: " + (err.message || err));
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function handleFile(e) {
     const file = e.target.files?.[0];
@@ -945,11 +985,22 @@ function PriceTableTab({ products, persistProducts }) {
         </div>
       </div>
 
+      <div className="vivo-card vivo-price-upload-card" style={{ marginBottom: 12 }}>
+        <p className="vivo-settings-hint" style={{ margin: "0 0 14px" }}>
+          Sincroniza direto do Google Sheets: planilha <strong>NOVA TABELA PRODUTOS 2.0</strong>, aba “Tabela Regime Normal - Natueu”
+          (colunas REF, Cód Fabricante, Custo Total + IPI e Total Custo ATON). Os valores existentes serão sobrescritos.
+          {lastSync && <><br/>Última sincronização: {fmtDate(lastSync.ts)} · {lastSync.updated} produtos atualizados.</>}
+        </p>
+        <button className={"vivo-btn vivo-btn-primary" + (syncing ? " vivo-btn-loading" : "")} onClick={syncFromSheets} disabled={syncing || loading}>
+          {syncing ? "Sincronizando…" : "Sincronizar com a planilha"}
+        </button>
+      </div>
+
       <div className="vivo-card vivo-price-upload-card">
         <p className="vivo-settings-hint" style={{ margin: "0 0 14px" }}>
-          Selecione <strong>Pasta1.xlsx</strong> (ou versão atualizada). Os preços existentes serão sobrescritos.
+          Alternativa manual: selecione <strong>Pasta1.xlsx</strong> (ou versão atualizada). Os preços existentes serão sobrescritos.
         </p>
-        <label className={"vivo-btn vivo-btn-primary" + (loading ? " vivo-btn-loading" : "")}>
+        <label className={"vivo-btn" + (loading ? " vivo-btn-loading" : "")}>
           {loading ? "Importando…" : "Selecionar planilha de preços"}
           <input type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }} onChange={handleFile} disabled={loading} />
         </label>
@@ -965,6 +1016,12 @@ function PriceTableTab({ products, persistProducts }) {
             <Package size={16} />
             {status.notFound} SKUs da tabela não encontrados nos produtos importados
           </div>
+          {status.source === "sheets" && status.missingColumns.length > 0 && (
+            <div className="vivo-price-result-item" style={{ color: "var(--amber)" }}>
+              <AlertTriangle size={16} />
+              Colunas não encontradas na planilha: {status.missingColumns.join(", ")}.
+            </div>
+          )}
         </div>
       )}
 
@@ -2192,6 +2249,49 @@ function mcMonthKeyBack(now, back) {
   const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
+// Carteira comercial por fornecedor — aba "Carteira" da planilha de MC mais recente.
+// "AB" (compartilhado, hoje só a Boni Natural) fica fora das duas carteiras. O vínculo
+// manual de marca (settings.mcBrandMap) também vale aqui.
+function mcCarteiraLookup(data, settings) {
+  const c = data && data.carteiras;
+  if (!c) return null;
+  const map = {};
+  for (const k of ["A", "B", "AB"]) for (const name of c[k] || []) map[mcNorm(name)] = k;
+  return (fornecedor) => map[settings?.mcBrandMap?.[fornecedor]] || map[mcNorm(fornecedor)] || null;
+}
+
+// Visão Geral de uma carteira: carrega a lista da planilha de MC e filtra os produtos
+function CarteiraOverviewTab({ carteira, products, persistProducts, settings }) {
+  const { loading, data, error, reload } = useMcData();
+  const lookup = useMemo(() => mcCarteiraLookup(data, settings), [data, settings]);
+  const filter = useCallback((p) => { const c = lookup(p.fornecedor); return c === carteira; }, [lookup, carteira]);
+  const info = useMemo(() => {
+    if (!lookup) return null;
+    const ativos = Object.values(products).filter((p) => !p.inactive && p.itemTag !== "inativo");
+    const fornecedores = (pred) => [...new Set(ativos.filter((p) => pred(lookup(p.fornecedor))).map((p) => p.fornecedor))].sort((x, y) => x.localeCompare(y, "pt-BR"));
+    return {
+      fonte: data.carteiras,
+      semCarteira: fornecedores((c) => !c),
+    };
+  }, [lookup, products, data]);
+
+  if (!data || !lookup) {
+    return (
+      <div className="vivo-page">
+        <header className="vivo-page-head"><h1>Visão Geral — Carteira {carteira}</h1></header>
+        <McStatusLine loading={loading} error={error} data={data} reload={reload} />
+        {data && !lookup && (
+          <div className="vivo-alert vivo-alert-warning">
+            <AlertTriangle size={16} />
+            <span>Nenhuma das planilhas de MC mais recentes tem a aba “Carteira” preenchida (colunas “Carteira A”, “Carteira B” e “AB”).</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+  return <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter} carteiraInfo={info} />;
+}
+
 function mcPickRefMonth(data, now = new Date()) {
   const anterior = mcMonthKeyBack(now, 1), retrasado = mcMonthKeyBack(now, 2);
   const find = (k) => ((data && data.months) || []).find((m) => m.key === k) || null;
@@ -3255,7 +3355,12 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
 }
 
 // ====================== OVERVIEW TAB ======================
-function OverviewTab({ products, persistProducts, settings }) {
+function OverviewTab({ products: allProducts, persistProducts, settings, carteira = null, filter = null, carteiraInfo = null }) {
+  // Visão por carteira: mesma tela, calculada só com os produtos da carteira.
+  // O painel do SKU continua recebendo todos os produtos (ele grava o objeto inteiro).
+  const products = useMemo(() => (
+    filter ? Object.fromEntries(Object.entries(allProducts).filter(([, p]) => filter(p))) : allProducts
+  ), [allProducts, filter]);
   const [sortCol, setSortCol]   = useState("capitalExc");
   const [sortDir, setSortDir]   = useState("desc");
   const [drawerProduct, setDrawerProduct] = useState(null);
@@ -3350,9 +3455,24 @@ function OverviewTab({ products, persistProducts, settings }) {
   return (
     <div className="vivo-page">
       <header className="vivo-page-head">
-        <h1>Visão Geral</h1>
-        <p>Todos os produtos ativos — capital excedente calculado pelo custo líquido.</p>
+        <h1>{carteira ? `Visão Geral — Carteira ${carteira}` : "Visão Geral"}</h1>
+        <p>{carteira
+          ? `Produtos ativos da carteira ${carteira} (${new Set(Object.values(products).map((p) => p.fornecedor)).size} fornecedores) — capital excedente calculado pelo custo líquido.`
+          : "Todos os produtos ativos — capital excedente calculado pelo custo líquido."}</p>
       </header>
+
+      {carteiraInfo && (
+        <div className="vivo-mc-note" style={{ margin: "-6px 0 16px" }}>
+          Carteira lida da aba “Carteira” da planilha {carteiraInfo.fonte.fileName}.
+          {carteiraInfo.semCarteira.length > 0 && (
+            <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: "pointer", color: "var(--amber)" }}>{carteiraInfo.semCarteira.length} fornecedores ativos não estão em nenhuma carteira</summary>
+              <div style={{ marginTop: 4 }}>{carteiraInfo.semCarteira.join(", ")}</div>
+              <div style={{ marginTop: 4 }}>Inclua-os na aba Carteira com o mesmo nome usado no ERP, ou vincule a marca na tela do fornecedor (seção de MC).</div>
+            </details>
+          )}
+        </div>
+      )}
 
       {/* KPIs */}
       <div className="vivo-supplier-kpis" style={{ marginBottom: 20 }}>
@@ -3505,7 +3625,7 @@ function OverviewTab({ products, persistProducts, settings }) {
       {drawerProduct && (
         <SkuDrawer
           product={drawerProduct}
-          products={products}
+          products={allProducts}
           persistProducts={persistProducts}
           onClose={() => setDrawerProduct(null)}
         />
@@ -4176,6 +4296,7 @@ const VIVO_CSS = `
   transition: background 0.12s, color 0.12s; border-left: 2px solid transparent;
 }
 .vivo-sidebar-sub-btn:hover { color: #e9e3d6; background: #2a2720; }
+.vivo-sidebar-sub-btn.is-nested { padding-left: 50px; font-size: 12px; }
 .vivo-sidebar-sub-btn.is-active { color: #fff; border-left-color: var(--amber); background: #2a2720; }
 .vivo-sidebar-footer {
   padding: 12px 16px; font-size: 11px; color: #4a4540;
