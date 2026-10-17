@@ -253,6 +253,11 @@ function ItemTagSelect({ product, products, persistProducts, disabled }) {
 // Custo líquido (col S) — usado em relatórios financeiros, capital imobilizado, estoque R$
 function custoLiq(p) { return p.custoLiquido || p.precoCusto || 0; }
 
+// Fornecedores com a etiqueta "Inativo" (settings.supplierTags)
+function inactiveBrandSet(settings) {
+  return new Set(Object.entries(settings?.supplierTags || {}).filter(([, t]) => t === "inativo").map(([f]) => f));
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -660,6 +665,22 @@ export default function App() {
     await storageSet(K_ORDERS, next);
   }, []);
 
+  // Marca inativa (etiqueta do fornecedor) tira os SKUs dela das telas de análise, sem
+  // alterar o cadastro. Essas telas recebem viewProducts; ao gravar, os SKUs escondidos
+  // voltam para o objeto (senão seriam apagados, já que as telas gravam o objeto inteiro).
+  const { viewProducts, hiddenProducts } = useMemo(() => {
+    const inativas = inactiveBrandSet(settings);
+    if (!inativas.size) return { viewProducts: products, hiddenProducts: {} };
+    const view = {}, hidden = {};
+    for (const [codigo, p] of Object.entries(products)) (inativas.has(p.fornecedor) ? hidden : view)[codigo] = p;
+    return { viewProducts: view, hiddenProducts: hidden };
+  }, [products, settings]);
+  const hiddenRef = React.useRef(hiddenProducts);
+  hiddenRef.current = hiddenProducts;
+  const persistViewProducts = useCallback(async (next) => {
+    await persistProducts({ ...hiddenRef.current, ...next });
+  }, [persistProducts]);
+
   if (!loaded) {
     return (
       <div className="vivo-root vivo-loading">
@@ -680,7 +701,7 @@ export default function App() {
         mainTab={mainTab}
         subTab={subTab}
         goTo={goTo}
-        monitoredCount={Object.values(products).filter((p) => p.monitoringActive).length}
+        monitoredCount={Object.values(viewProducts).filter((p) => p.monitoringActive).length}
       />
       <main className="vivo-main">
         {mainTab === "relatorios" && subTab === "import" && (
@@ -711,10 +732,10 @@ export default function App() {
           />
         )}
         {mainTab === "compras" && subTab === "overview" && (
-          <OverviewTab products={products} persistProducts={persistProducts} settings={settings} />
+          <OverviewTab products={viewProducts} persistProducts={persistViewProducts} settings={settings} />
         )}
         {mainTab === "compras" && (subTab === "overview-a" || subTab === "overview-b") && (
-          <CarteiraOverviewTab key={subTab} carteira={subTab === "overview-a" ? "A" : "B"} products={products} persistProducts={persistProducts} settings={settings} persistSettings={persistSettings} />
+          <CarteiraOverviewTab key={subTab} carteira={subTab === "overview-a" ? "A" : "B"} products={viewProducts} persistProducts={persistViewProducts} settings={settings} persistSettings={persistSettings} />
         )}
         {mainTab === "compras" && subTab === "brands" && (
           <BrandsTab
@@ -743,13 +764,13 @@ export default function App() {
           />
         )}
         {mainTab === "performance" && subTab === "tendencias" && (
-          <PerformanceTab products={products} />
+          <PerformanceTab products={viewProducts} />
         )}
         {mainTab === "qualidade" && subTab === "analise" && (
-          <StockQualityTab products={products} persistProducts={persistProducts} />
+          <StockQualityTab products={viewProducts} persistProducts={persistViewProducts} />
         )}
         {mainTab === "qualidade" && subTab === "monitorados" && (
-          <MonitoredTab products={products} persistProducts={persistProducts} />
+          <MonitoredTab products={viewProducts} persistProducts={persistViewProducts} />
         )}
       </main>
     </div>
@@ -4171,11 +4192,66 @@ function CleanupTab({ products, persistProducts, history, settings, orders, pers
     const next = { ...products }; next[codigo] = { ...next[codigo], inactive: false, inactivatedAt: null }; await persistProducts(next);
   }
 
+  // SKUs ainda ativos no cadastro cuja marca está com a etiqueta "Inativo"
+  const brandGroups = useMemo(() => {
+    const inativas = inactiveBrandSet(settings);
+    const groups = {};
+    for (const p of Object.values(products)) {
+      if (p.inactive || !inativas.has(p.fornecedor)) continue;
+      const g = groups[p.fornecedor] || (groups[p.fornecedor] = { fornecedor: p.fornecedor, codigos: [], estoque: 0 });
+      g.codigos.push(p.codigo);
+      g.estoque += p.estoque || 0;
+    }
+    return Object.values(groups).sort((a, b) => a.fornecedor.localeCompare(b.fornecedor, "pt-BR"));
+  }, [products, settings]);
+  const brandSkuCount = brandGroups.reduce((acc, g) => acc + g.codigos.length, 0);
+
+  async function inactivateBrandSkus(groups) {
+    const codigos = groups.flatMap((g) => g.codigos);
+    const label = groups.length === 1 ? `da marca ${groups[0].fornecedor}` : `de ${groups.length} marcas inativas`;
+    if (!window.confirm(`Inativar ${codigos.length} SKU(s) ${label} no cadastro? Eles podem ser reativados na lista de produtos inativos.`)) return;
+    const now = Date.now();
+    const next = { ...products };
+    for (const c of codigos) next[c] = { ...next[c], inactive: true, inactivatedAt: now };
+    await persistProducts(next);
+  }
+
+  const brandSection = brandGroups.length > 0 && (
+    <div className="vivo-card" style={{ padding: "14px 16px", marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div>
+          <strong style={{ fontSize: 13 }}>SKUs de marcas inativas</strong>
+          <div className="vivo-settings-hint" style={{ margin: "2px 0 0" }}>
+            {brandSkuCount} SKU(s) de {brandGroups.length} marca(s) com a etiqueta “Inativo” ainda estão ativos no cadastro.
+            Eles já não aparecem nas telas de análise; inativar aqui os tira também do cadastro.
+          </div>
+        </div>
+        <button className="vivo-btn vivo-btn-danger" onClick={() => inactivateBrandSkus(brandGroups)}>Inativar todos ({brandSkuCount})</button>
+      </div>
+      <div className="vivo-table-wrap">
+        <table className="vivo-table vivo-table-compact">
+          <thead><tr><th>Marca</th><th className="num">SKUs ativos</th><th className="num">Estoque (un.)</th><th></th></tr></thead>
+          <tbody>
+            {brandGroups.map((g) => (
+              <tr key={g.fornecedor}>
+                <td>{g.fornecedor}</td>
+                <td className="num mono">{g.codigos.length}</td>
+                <td className={"num mono" + (g.estoque > 0 ? " vivo-below-min" : "")} title={g.estoque > 0 ? "Ainda há estoque desta marca" : undefined}>{fmtNumber(g.estoque)}</td>
+                <td className="num"><button className="vivo-toggle-btn" onClick={() => inactivateBrandSkus([g])}>Inativar SKUs</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
   if (!history || history.length === 0) {
     return (
       <div className="vivo-page">
         <header className="vivo-page-head"><h1>Limpeza de itens</h1></header>
         <StorageDiagnosticPanel diag={diag} migrationState={migrationState} onCheck={checkStorage} onMigrate={forceMigration} onExport={exportBackup} onImportFile={importBackupFile} importState={importState} onClearHistory={clearAllSalesHistory} />
+        {brandSection}
         <EmptyState icon={Trash2} title="Nenhuma importação ainda" text="Importe ao menos um relatório." />
       </div>
     );
@@ -4188,6 +4264,8 @@ function CleanupTab({ products, persistProducts, history, settings, orders, pers
         <p>Última importação: <strong>{fmtDate(lastImportTs)}</strong>. Itens que não apareceram no último envio.</p>
       </header>
       <StorageDiagnosticPanel diag={diag} migrationState={migrationState} onCheck={checkStorage} onMigrate={forceMigration} onExport={exportBackup} onImportFile={importBackupFile} importState={importState} onClearHistory={clearAllSalesHistory} />
+
+      {brandSection}
 
       {missing.length === 0 ? (
         <EmptyState icon={CheckCircle2} title="Nenhum item para limpar" text="Todos os produtos aparecem na última importação." />
