@@ -714,7 +714,7 @@ export default function App() {
           <OverviewTab products={products} persistProducts={persistProducts} settings={settings} />
         )}
         {mainTab === "compras" && (subTab === "overview-a" || subTab === "overview-b") && (
-          <CarteiraOverviewTab key={subTab} carteira={subTab === "overview-a" ? "A" : "B"} products={products} persistProducts={persistProducts} settings={settings} />
+          <CarteiraOverviewTab key={subTab} carteira={subTab === "overview-a" ? "A" : "B"} products={products} persistProducts={persistProducts} settings={settings} persistSettings={persistSettings} />
         )}
         {mainTab === "compras" && subTab === "brands" && (
           <BrandsTab
@@ -2252,16 +2252,62 @@ function mcMonthKeyBack(now, back) {
 // Carteira comercial por fornecedor — aba "Carteira" da planilha de MC mais recente.
 // "AB" (compartilhado, hoje só a Boni Natural) fica fora das duas carteiras. O vínculo
 // manual de marca (settings.mcBrandMap) também vale aqui.
+// Vínculo feito no app (settings.carteiraManual: fornecedor → "A" | "B" | "fora") tem
+// prioridade sobre a planilha; "fora" deixa o fornecedor fora das duas, como a lista AB.
 function mcCarteiraLookup(data, settings) {
   const c = data && data.carteiras;
   if (!c) return null;
   const map = {};
   for (const k of ["A", "B", "AB"]) for (const name of c[k] || []) map[mcNorm(name)] = k;
-  return (fornecedor) => map[settings?.mcBrandMap?.[fornecedor]] || map[mcNorm(fornecedor)] || null;
+  const manual = settings?.carteiraManual || {};
+  return (fornecedor) => manual[fornecedor] || map[settings?.mcBrandMap?.[fornecedor]] || map[mcNorm(fornecedor)] || null;
+}
+
+const CARTEIRA_OPCOES = [["A", "Carteira A"], ["B", "Carteira B"], ["fora", "Nenhuma"]];
+
+// Aviso das telas de carteira: fornecedores sem carteira (com botões para relacionar)
+// e os vínculos já feitos no app (clicar na opção marcada desfaz o vínculo).
+function CarteiraNotice({ info, manual, onSet }) {
+  const [saving, setSaving] = useState(null);
+  const manuais = Object.entries(manual).sort((a, b) => a[0].localeCompare(b[0], "pt-BR"));
+  async function set(f, v) {
+    setSaving(f);
+    try { await onSet(f, v); } finally { setSaving(null); }
+  }
+  const row = (f, value) => (
+    <div className="vivo-carteira-row" key={f}>
+      <span>{f}</span>
+      <div className="vivo-mc-seg">
+        {CARTEIRA_OPCOES.map(([v, label]) => (
+          <button key={v} className={value === v ? "is-active" : ""} disabled={saving === f}
+            title={value === v ? "Desfazer vínculo" : undefined}
+            onClick={() => set(f, value === v ? null : v)}>{label}</button>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <div className="vivo-mc-note" style={{ margin: "-6px 0 16px" }}>
+      Carteira lida da aba “Carteira” da planilha {info.fonte.fileName}
+      {manuais.length > 0 ? `, mais ${manuais.length} vínculo(s) feito(s) aqui no app.` : "."}
+      {info.semCarteira.length > 0 && (
+        <details style={{ marginTop: 6 }}>
+          <summary style={{ cursor: "pointer", color: "var(--amber)" }}>{info.semCarteira.length} fornecedores ativos não estão em nenhuma carteira — clique para relacionar</summary>
+          <div className="vivo-carteira-list">{info.semCarteira.map((f) => row(f, null))}</div>
+        </details>
+      )}
+      {manuais.length > 0 && (
+        <details style={{ marginTop: 6 }}>
+          <summary style={{ cursor: "pointer" }}>Vínculos feitos no app ({manuais.length})</summary>
+          <div className="vivo-carteira-list">{manuais.map(([f, v]) => row(f, v))}</div>
+        </details>
+      )}
+    </div>
+  );
 }
 
 // Visão Geral de uma carteira: carrega a lista da planilha de MC e filtra os produtos
-function CarteiraOverviewTab({ carteira, products, persistProducts, settings }) {
+function CarteiraOverviewTab({ carteira, products, persistProducts, settings, persistSettings }) {
   const { loading, data, error, reload } = useMcData();
   const lookup = useMemo(() => mcCarteiraLookup(data, settings), [data, settings]);
   const filter = useCallback((p) => { const c = lookup(p.fornecedor); return c === carteira; }, [lookup, carteira]);
@@ -2274,6 +2320,12 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings }) 
       semCarteira: fornecedores((c) => !c),
     };
   }, [lookup, products, data]);
+
+  async function setManual(fornecedor, value) {
+    const next = { ...(settings.carteiraManual || {}) };
+    if (value) next[fornecedor] = value; else delete next[fornecedor];
+    await persistSettings({ ...settings, carteiraManual: next });
+  }
 
   if (!data || !lookup) {
     return (
@@ -2289,7 +2341,10 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings }) 
       </div>
     );
   }
-  return <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter} carteiraInfo={info} />;
+  return (
+    <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter}
+      notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />} />
+  );
 }
 
 function mcPickRefMonth(data, now = new Date()) {
@@ -3355,7 +3410,7 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
 }
 
 // ====================== OVERVIEW TAB ======================
-function OverviewTab({ products: allProducts, persistProducts, settings, carteira = null, filter = null, carteiraInfo = null }) {
+function OverviewTab({ products: allProducts, persistProducts, settings, carteira = null, filter = null, notice = null }) {
   // Visão por carteira: mesma tela, calculada só com os produtos da carteira.
   // O painel do SKU continua recebendo todos os produtos (ele grava o objeto inteiro).
   const products = useMemo(() => (
@@ -3461,18 +3516,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
           : "Todos os produtos ativos — capital excedente calculado pelo custo líquido."}</p>
       </header>
 
-      {carteiraInfo && (
-        <div className="vivo-mc-note" style={{ margin: "-6px 0 16px" }}>
-          Carteira lida da aba “Carteira” da planilha {carteiraInfo.fonte.fileName}.
-          {carteiraInfo.semCarteira.length > 0 && (
-            <details style={{ marginTop: 4 }}>
-              <summary style={{ cursor: "pointer", color: "var(--amber)" }}>{carteiraInfo.semCarteira.length} fornecedores ativos não estão em nenhuma carteira</summary>
-              <div style={{ marginTop: 4 }}>{carteiraInfo.semCarteira.join(", ")}</div>
-              <div style={{ marginTop: 4 }}>Inclua-os na aba Carteira com o mesmo nome usado no ERP, ou vincule a marca na tela do fornecedor (seção de MC).</div>
-            </details>
-          )}
-        </div>
-      )}
+      {notice}
 
       {/* KPIs */}
       <div className="vivo-supplier-kpis" style={{ marginBottom: 20 }}>
@@ -4500,6 +4544,8 @@ const VIVO_CSS = `
 .vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
 .vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
 .vivo-mc-line-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 2px; }
+.vivo-carteira-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 320px; overflow-y: auto; }
+.vivo-carteira-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 4px 4px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font-size: 12px; }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
