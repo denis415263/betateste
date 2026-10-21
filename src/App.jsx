@@ -1775,6 +1775,7 @@ function StockQualityTab({ products, persistProducts }) {
     const sorted = [...out];
     if (sortBy === "stockDays_desc") sorted.sort((a, b) => b.quality.stockDays - a.quality.stockDays);
     else if (sortBy === "capital_desc") sorted.sort((a, b) => b.quality.capitalImobilizado - a.quality.capitalImobilizado);
+    else if (sortBy === "sku_asc") sorted.sort((a, b) => String(a.codigo).localeCompare(String(b.codigo), "pt-BR", { numeric: true }));
     return sorted;
   }, [computed, supplierFilter, search, sortBy]);
 
@@ -1837,6 +1838,7 @@ function StockQualityTab({ products, persistProducts }) {
         </select>
         <select className="vivo-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
           <option value="stockDays_desc">Tempo de estoque (maior)</option>
+          <option value="sku_asc">SKU (A→Z)</option>
           <option value="capital_desc">Capital imobilizado (maior)</option>
         </select>
       </div>
@@ -2083,10 +2085,6 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
 
   const { fornecedor, ts } = generatedOrder;
   const mcMonth = mcRef.month;
-  const mcCanaisAndamento = mcMonth && mcMonth.provisional
-    ? ((mcMonth.canaisEmAndamento || []).map((k) => (mc.data.channelLabels || {})[k] || k).join(", ") || "algum canal")
-    : null;
-  const mcBrand = mcMonth ? mcMonth.brands[(settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor)] : null;
   const mcItem = (codigo) => (mcMonth ? mcMonth.items[String(codigo).toUpperCase()] : null);
 
   const items = useMemo(() => {
@@ -2147,28 +2145,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
         </div>
         <button className="vivo-btn vivo-btn-secondary" onClick={exportToExcel} style={{ marginLeft: "auto" }}>Exportar Excel</button>
       </div>
-      <div className="vivo-mc-order-box vivo-card">
-        <div className="vivo-mc-order-title">Marca em {mcRef.label} <span>· planilha de margem de contribuição</span></div>
-        {mc.loading && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Carregando MC…</div>}
-        {mc.error && <div className="vivo-mc-note vivo-mc-error" style={{ marginTop: 0 }}>Não foi possível carregar a MC: {mc.error}</div>}
-        {mc.data && !mcMonth && <div className="vivo-mc-note" style={{ marginTop: 0 }}>A planilha de MC de {mcRef.label} ainda não tem dados.</div>}
-        {mc.data && mcMonth && !mcBrand && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Marca sem vendas em {mcRef.label} na planilha de MC (ou com nome diferente — vincule na tela do fornecedor).</div>}
-        {mcBrand && (
-          <div className="vivo-mc-order-kpis">
-            <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
-            <div><span>MC R$</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtCurrency(mcBrand.mc)}</strong></div>
-            <div><span>MC %</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtPct(mcBrand.fat ? mcBrand.mc / mcBrand.fat : null)}</strong></div>
-          </div>
-        )}
-        {mc.data && mcRef.nota && (
-          <div className="vivo-mc-order-warn">
-            <AlertTriangle size={13} /> {mcRef.nota}
-          </div>
-        )}
-        {mcCanaisAndamento && (
-          <div className="vivo-mc-note">Informativo: a planilha de {mcRef.label} ainda marca {mcCanaisAndamento} como “em andamento”.</div>
-        )}
-      </div>
+      <McBrandMonthCard fornecedor={fornecedor} settings={settings} />
       <div className="vivo-table-wrap vivo-card">
         <table className="vivo-table vivo-table-compact">
           <thead>
@@ -2365,6 +2342,42 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
   return (
     <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter}
       notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />} />
+  );
+}
+
+// Card "Marca em <mês>": faturamento, MC R$ e MC % da marca no mês de referência
+// (mesma regra de mês do Pedido Gerado — ver mcPickRefMonth).
+function McBrandMonthCard({ fornecedor, settings, style }) {
+  const mc = useMcData();
+  const mcRef = mcPickRefMonth(mc.data);
+  const mcMonth = mcRef.month;
+  const mcCanaisAndamento = mcMonth && mcMonth.provisional
+    ? ((mcMonth.canaisEmAndamento || []).map((k) => (mc.data.channelLabels || {})[k] || k).join(", ") || "algum canal")
+    : null;
+  const mcBrand = mcMonth ? mcMonth.brands[(settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor)] : null;
+  return (
+    <div className="vivo-mc-order-box vivo-card" style={style}>
+      <div className="vivo-mc-order-title">Marca em {mcRef.label} <span>· planilha de margem de contribuição</span></div>
+      {mc.loading && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Carregando MC…</div>}
+      {mc.error && <div className="vivo-mc-note vivo-mc-error" style={{ marginTop: 0 }}>Não foi possível carregar a MC: {mc.error}</div>}
+      {mc.data && !mcMonth && <div className="vivo-mc-note" style={{ marginTop: 0 }}>A planilha de MC de {mcRef.label} ainda não tem dados.</div>}
+      {mc.data && mcMonth && !mcBrand && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Marca sem vendas em {mcRef.label} na planilha de MC (ou com nome diferente — vincule na seção de MC da tela do fornecedor).</div>}
+      {mcBrand && (
+        <div className="vivo-mc-order-kpis">
+          <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
+          <div><span>MC R$</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtCurrency(mcBrand.mc)}</strong></div>
+          <div><span>MC %</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtPct(mcBrand.fat ? mcBrand.mc / mcBrand.fat : null)}</strong></div>
+        </div>
+      )}
+      {mc.data && mcRef.nota && (
+        <div className="vivo-mc-order-warn">
+          <AlertTriangle size={13} /> {mcRef.nota}
+        </div>
+      )}
+      {mcCanaisAndamento && (
+        <div className="vivo-mc-note">Informativo: a planilha de {mcRef.label} ainda marca {mcCanaisAndamento} como “em andamento”.</div>
+      )}
+    </div>
   );
 }
 
@@ -2984,7 +2997,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
-    else { setSortCol(col); setSortDir(col === "venceEm" ? "asc" : "desc"); }
+    else { setSortCol(col); setSortDir(col === "venceEm" || col === "codigo" ? "asc" : "desc"); }
   }
 
   function SortBtn({ col }) {
@@ -3028,6 +3041,10 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
         }
         const va = a[sortCol] ?? -Infinity;
         const vb = b[sortCol] ?? -Infinity;
+        if (typeof va === "string" || typeof vb === "string") {
+          const cmp = String(va).localeCompare(String(vb), "pt-BR", { numeric: true });
+          return sortDir === "asc" ? cmp : -cmp;
+        }
         return sortDir === "desc" ? vb - va : va - vb;
       });
     }
@@ -3082,12 +3099,14 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
         {minOrder && <div className="vivo-kpi-card"><span className="vivo-kpi-label">Pedido Mínimo</span><span className="vivo-kpi-value">{fmtCurrency(minOrder)}</span></div>}
       </div>
 
+      {tag !== "inativo" && <McBrandMonthCard fornecedor={fornecedor} settings={settings} style={{ marginTop: 14 }} />}
+
       <div className="vivo-supplier-charts">
         <div className="vivo-supplier-chart-block vivo-card">
           <MiniCurrencyChart series={totalStockSeries} color="var(--olive-dark)" title={totalStockSeries.length >= 2 ? `Estoque total (custo líq.) — ${fmtDateShort(totalStockSeries[0].ts)} a ${fmtDateShort(totalStockSeries[totalStockSeries.length-1].ts)}` : "Estoque total em R$"} />
         </div>
         <div className="vivo-supplier-chart-block vivo-card">
-          <MiniCurrencyChart series={excessStockSeries} color="var(--rust)" title={excessStockSeries.length >= 2 ? `Capital excedente (>90d, custo líq.) — ${fmtDateShort(excessStockSeries[0].ts)} a ${fmtDateShort(excessStockSeries[excessStockSeries.length-1].ts)}` : "Capital excedente"} />
+          <ExcessDualChart excessSeries={excessStockSeries} totalSeries={totalStockSeries} title={excessStockSeries.length >= 2 ? `Capital excedente (>90d, custo líq.) — ${fmtDateShort(excessStockSeries[0].ts)} a ${fmtDateShort(excessStockSeries[excessStockSeries.length-1].ts)}` : "Capital excedente"} />
         </div>
         <div className="vivo-supplier-chart-block vivo-card">
           <MiniLineChart series={salesSeries} valueKey="total" color="#4a7c6f" unit="un" title={salesSeries.length >= 2 ? `Vendas 30D — ${fmtDateShort(salesSeries[0].ts)} a ${fmtDateShort(salesSeries[salesSeries.length-1].ts)}` : "Vendas 30D totais"} />
@@ -3138,7 +3157,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
               <tr>
                 <th className="vivo-sticky" style={stickyCol(0, itemColWidth)}>Item</th>
                 <th className="vivo-sticky" style={stickyCol(itemColWidth, 96)}>Tag</th>
-                <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(itemColWidth + 96, 64)}>SKU</th>
+                <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(itemColWidth + 96, 64)}>SKU <SortBtn col="codigo" /></th>
                 {showValidade && <th className="num" style={{ minWidth: 70 }}>Validade</th>}
                 {showValidade && <th className="num">Últ. Entrada <SortBtn col="ultimaEntrada" /></th>}
                 {showValidade && <th className="num">Vence em <SortBtn col="venceEm" /></th>}
@@ -3356,6 +3375,103 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
   );
 }
 
+// Capital excedente da marca: R$ (eixo esquerdo) e % do estoque total (eixo direito),
+// com a meta de 10% no eixo da direita. Os rótulos de cada eixo usam a cor da sua linha.
+const EXCESS_PCT_COLOR = "#2a78d6";
+function ExcessDualChart({ excessSeries, totalSeries, title }) {
+  const [hover, setHover] = useState(null);
+  const svgRef = React.useRef(null);
+  const series = useMemo(() => {
+    const totalByDay = Object.fromEntries((totalSeries || []).map((t) => [t.dk, t.capital]));
+    return (excessSeries || []).map((e) => {
+      const total = totalByDay[e.dk];
+      return { ...e, pct: total > 0 ? e.capital / total : null };
+    });
+  }, [excessSeries, totalSeries]);
+
+  if (series.length < 2) {
+    return <div><div className="vivo-minichart-header"><span className="vivo-capital-chart-label">{title}</span></div><div className="vivo-capital-chart vivo-capital-chart-empty"><span>Dados insuficientes</span></div></div>;
+  }
+
+  const W = 800, H = 150, PAD = { top: 16, right: 58, bottom: 32, left: 80 };
+  const innerW = W - PAD.left - PAD.right, innerH = H - PAD.top - PAD.bottom;
+  const first = series[0], last = series[series.length - 1];
+  const tsRange = last.ts - first.ts || 1;
+  const toX = (ts) => PAD.left + ((ts - first.ts) / tsRange) * innerW;
+  // Eixo R$ começa em zero; eixo % também, e sempre mostra a meta de 10%
+  const maxV = Math.max(...series.map((s) => s.capital), 1);
+  const pcts = series.map((s) => s.pct).filter((p) => p !== null);
+  const maxP = Math.max(0.1, ...pcts) * 1.1;
+  const yV = (v) => PAD.top + innerH - (v / maxV) * innerH;
+  const yP = (p) => PAD.top + innerH - (p / maxP) * innerH;
+  const ptsV = series.map((s) => `${toX(s.ts)},${yV(s.capital)}`).join(" ");
+  const ptsP = series.filter((s) => s.pct !== null).map((s) => `${toX(s.ts)},${yP(s.pct)}`).join(" ");
+  const area = `${toX(first.ts)},${PAD.top + innerH} ${ptsV} ${toX(last.ts)},${PAD.top + innerH}`;
+  const ticks = [0, 0.5, 1];
+  const fmtP = (p) => (p * 100).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "%";
+  const xLabels = [];
+  { const d = new Date(first.ts); d.setDate(1); d.setMonth(d.getMonth() + 1); while (d.getTime() <= last.ts) { xLabels.push(d.getTime()); d.setMonth(d.getMonth() + 1); } }
+
+  function onMove(e) {
+    const svg = svgRef.current; if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const vbX = (e.clientX - rect.left) * (W / rect.width);
+    let best = 0, dist = Infinity;
+    series.forEach((s, i) => { const d = Math.abs(toX(s.ts) - vbX); if (d < dist) { dist = d; best = i; } });
+    setHover(best);
+  }
+  const h = hover !== null ? series[hover] : last;
+  const tipLeft = hover !== null && toX(h.ts) < PAD.left + innerW * 0.65;
+
+  return (
+    <div>
+      <div className="vivo-minichart-header">
+        <span className="vivo-capital-chart-label">{title}</span>
+        <span className="vivo-minichart-current" style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+          <span style={{ color: "var(--rust)" }}><strong>{fmtCurrency(h.capital)}</strong></span>
+          <span style={{ color: EXCESS_PCT_COLOR }}><strong>{h.pct !== null ? fmtP(h.pct) : "—"}</strong> <span style={{ fontSize: 11 }}>do estoque</span></span>
+        </span>
+      </div>
+      <div className="vivo-dual-legend">
+        <span><i style={{ background: "var(--rust)" }} />Capital excedente R$ (eixo esq.)</span>
+        <span><i style={{ background: EXCESS_PCT_COLOR }} />% do estoque total (eixo dir.)</span>
+        <span><i className="is-dashed" style={{ borderColor: EXCESS_PCT_COLOR }} />Meta 10%</span>
+      </div>
+      <div style={{ position: "relative" }}>
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="vivo-supplier-chart-svg" preserveAspectRatio="none" onMouseMove={onMove} onMouseLeave={() => setHover(null)} style={{ cursor: "crosshair" }}>
+          <defs><linearGradient id="excess-dual-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--rust)" stopOpacity="0.18" /><stop offset="100%" stopColor="var(--rust)" stopOpacity="0.02" /></linearGradient></defs>
+          {ticks.map((t) => {
+            const y = PAD.top + innerH - t * innerH;
+            return (
+              <g key={t}>
+                <line x1={PAD.left} y1={y} x2={PAD.left + innerW} y2={y} stroke="var(--line)" strokeWidth="1" strokeDasharray="4,3" />
+                <text x={PAD.left - 6} y={y + 4} fontSize="8.5" fill="var(--rust)" textAnchor="end">{fmtCurrency(t * maxV)}</text>
+                <text x={PAD.left + innerW + 6} y={y + 4} fontSize="8.5" fill={EXCESS_PCT_COLOR} textAnchor="start">{fmtP(t * maxP)}</text>
+              </g>
+            );
+          })}
+          <line x1={PAD.left} y1={yP(0.1)} x2={PAD.left + innerW} y2={yP(0.1)} stroke={EXCESS_PCT_COLOR} strokeWidth="1" strokeDasharray="5,4" opacity="0.7" />
+          <polygon points={area} fill="url(#excess-dual-grad)" />
+          <polyline points={ptsV} fill="none" stroke="var(--rust)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          <polyline points={ptsP} fill="none" stroke={EXCESS_PCT_COLOR} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {hover !== null && <line x1={toX(h.ts)} y1={PAD.top} x2={toX(h.ts)} y2={PAD.top + innerH} stroke="var(--ink-soft)" strokeWidth="1" strokeDasharray="3,2" />}
+          <circle cx={toX(h.ts)} cy={yV(h.capital)} r={4} fill="var(--rust)" stroke="var(--card)" strokeWidth="2" />
+          {h.pct !== null && <circle cx={toX(h.ts)} cy={yP(h.pct)} r={4} fill={EXCESS_PCT_COLOR} stroke="var(--card)" strokeWidth="2" />}
+          {xLabels.map((ts) => (<g key={ts}><line x1={toX(ts)} y1={PAD.top + innerH} x2={toX(ts)} y2={PAD.top + innerH + 4} stroke="var(--ink-soft)" strokeWidth="1" /><text x={toX(ts)} y={H - 4} fontSize="9" fill="var(--ink-soft)" textAnchor="middle">{new Date(ts).toLocaleDateString("pt-BR", { month: "short" })}</text></g>))}
+          <line x1={PAD.left} y1={PAD.top + innerH} x2={PAD.left + innerW} y2={PAD.top + innerH} stroke="var(--line)" strokeWidth="1" />
+        </svg>
+        {hover !== null && (
+          <div className="vivo-chart-tooltip" style={{ left: tipLeft ? `calc(${(toX(h.ts) / W) * 100}% + 8px)` : "auto", right: tipLeft ? "auto" : `calc(${((W - toX(h.ts)) / W) * 100}% + 8px)`, top: "4px" }}>
+            <div className="vivo-chart-tooltip-date">{new Date(h.ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}</div>
+            <div className="vivo-mc-tip-row"><span>Capital excedente</span><b>{fmtCurrency(h.capital)}</b></div>
+            <div className="vivo-mc-tip-row"><span>% do estoque</span><b>{h.pct !== null ? fmtP(h.pct) : "—"}</b></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MiniLineChart({ series, valueKey, color, unit, title }) {
   const [hover, setHover] = useState(null);
   const svgRef = React.useRef(null);
@@ -3451,7 +3567,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
 
   function toggleSort(col) {
     if (sortCol === col) setSortDir((d) => d === "asc" ? "desc" : "asc");
-    else { setSortCol(col); setSortDir(col === "venceEm" ? "asc" : "desc"); }
+    else { setSortCol(col); setSortDir(col === "venceEm" || col === "codigo" || col === "fornecedor" ? "asc" : "desc"); }
   }
 
   function SortBtn({ col }) {
@@ -3500,7 +3616,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
         }
         const va = a[sortCol] ?? -Infinity;
         const vb = b[sortCol] ?? -Infinity;
-        if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR") : vb.localeCompare(va, "pt-BR");
+        if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb, "pt-BR", { numeric: true }) : vb.localeCompare(va, "pt-BR", { numeric: true });
         return sortDir === "desc" ? vb - va : va - vb;
       });
   }, [skus, sortCol, sortDir, validadeFilter]);
@@ -3623,7 +3739,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
               <th className="vivo-sticky" style={stickyCol(0, 200)}>Item</th>
               <th className="vivo-sticky" style={stickyCol(200, 80)}>Tag</th>
               <th className="vivo-sticky" style={stickyCol(280, 112)}>Fornecedor <SortBtn col="fornecedor" /></th>
-              <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(392, 64)}>SKU</th>
+              <th className="mono vivo-sticky vivo-sticky-last" style={stickyCol(392, 64)}>SKU <SortBtn col="codigo" /></th>
               <th className="num">Estoque <SortBtn col="estoque" /></th>
               <th className="num">Vendas 30D <SortBtn col="vendas30" /></th>
               <th className="num">Cobertura <SortBtn col="coverageDays" /></th>
@@ -4624,6 +4740,10 @@ const VIVO_CSS = `
 .vivo-mc-line-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 2px; }
 .vivo-carteira-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 320px; overflow-y: auto; }
 .vivo-carteira-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 4px 4px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); font-size: 12px; }
+.vivo-dual-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--ink-soft); margin: 2px 0 4px; }
+.vivo-dual-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.vivo-dual-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
+.vivo-dual-legend i.is-dashed { height: 0; border-top: 2px dashed; background: none !important; }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
