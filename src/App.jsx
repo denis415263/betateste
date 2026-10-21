@@ -2071,7 +2071,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
   const defaultDays = generatedOrder?.days || 30;
   const [skuDays, setSkuDays]   = useState({});
   const [drawerProduct, setDrawerProduct] = useState(null);
-  useEffect(() => { setSkuDays({}); }, [generatedOrder]);
+  const [showOrderSheet, setShowOrderSheet] = useState(false);
+  useEffect(() => { setSkuDays({}); setShowOrderSheet(false); }, [generatedOrder]);
   const mc = useMcData();
   const mcRef = mcPickRefMonth(mc.data);
 
@@ -2106,8 +2107,12 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
 
   function setDaysForSku(codigo, value) { setSkuDays((prev) => ({ ...prev, [codigo]: Math.max(1, Number(value) || 1) })); }
 
-  function exportToExcel() {
-    const rows = items.map((p) => ({
+  // Itens que entram no pedido (quantidade > 0) — usados na tela "Gerar Pedido"
+  const orderItems = items.filter((i) => i.needed > 0);
+
+  function exportToExcel(list = items) {
+    const total = list.reduce((acc, i) => acc + i.valorCompra, 0);
+    const rows = list.map((p) => ({
       "Cód Fabricante":    p.codFabricante || "",
       "Item":              p.item,
       "Fornecedor":        p.fornecedor,
@@ -2120,7 +2125,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
     rows.push({
       "Cód Fabricante": "", "Item": "TOTAL", "Fornecedor": fornecedor, "SKU": "",
       "Unidades": "", "Qt Caixas": "",
-      "Custo de Nota (R$)": "", "Valor Compra (R$)": Number(totalPedido.toFixed(2)),
+      "Custo de Nota (R$)": "", "Valor Compra (R$)": Number(total.toFixed(2)),
     });
     const ws = XLSX.utils.json_to_sheet(rows);
     ws["!cols"] = [{ wch: 16 }, { wch: 40 }, { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 18 }];
@@ -2143,7 +2148,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
         <div className="vivo-generated-order-meta">
           <span>{items.length} itens · {totalItensNecessidade} precisam de reposição</span>
         </div>
-        <button className="vivo-btn vivo-btn-secondary" onClick={exportToExcel} style={{ marginLeft: "auto" }}>Exportar Excel</button>
+        <button className="vivo-btn vivo-btn-primary" onClick={() => setShowOrderSheet(true)} disabled={orderItems.length === 0} style={{ marginLeft: "auto" }}
+          title={orderItems.length === 0 ? "Nenhum item precisa de reposição" : undefined}>Gerar Pedido</button>
       </div>
       <McBrandMonthCard fornecedor={fornecedor} settings={settings} />
       <div className="vivo-table-wrap vivo-card">
@@ -2222,6 +2228,190 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
           onClose={() => setDrawerProduct(null)}
         />
       )}
+
+      {showOrderSheet && (
+        <OrderSheet fornecedor={fornecedor} items={orderItems} onClose={() => setShowOrderSheet(false)} onExport={() => exportToExcel(orderItems)} />
+      )}
+    </div>
+  );
+}
+
+// Desenha o pedido como imagem (PNG) — usado pelo botão "Copiar print".
+// O nome do item quebra em até 3 linhas (o que diferencia os produtos costuma estar no fim).
+function drawOrderCanvas(fornecedor, items, total) {
+  const S = 2; // resolução dobrada para a imagem ficar nítida
+  const PAD = 24, TITLE_H = 56, HEAD_H = 30, LINE_H = 15, CELL_PAD = 6, MIN_ROW = 26, MAX_LINES = 3;
+  const cols = [
+    { key: "codFab", label: "Cód. Fabricante", w: 120 },
+    { key: "item",   label: "Item",            w: 380, wrap: true },
+    { key: "sku",    label: "SKU",             w: 90 },
+    { key: "un",     label: "Unidades",        w: 80,  right: true },
+    { key: "cx",     label: "Caixas",          w: 64,  right: true },
+    { key: "custo",  label: "Custo nota",      w: 100, right: true },
+    { key: "valor",  label: "Valor",           w: 110, right: true },
+  ];
+  const font = (size, weight = 400) => `${weight} ${size}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
+  const tableW = cols.reduce((acc, c) => acc + c.w, 0);
+  const W = tableW + PAD * 2;
+
+  // Medição antes de dimensionar o canvas (redimensionar apaga o conteúdo)
+  const measure = document.createElement("canvas").getContext("2d");
+  measure.font = font(12);
+  const fit = (ctx, text, w) => {
+    let t = String(text ?? "");
+    if (ctx.measureText(t).width <= w) return t;
+    while (t.length > 1 && ctx.measureText(t + "…").width > w) t = t.slice(0, -1);
+    return t + "…";
+  };
+  const wrap = (ctx, text, w) => {
+    const words = String(text ?? "").split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = "";
+    for (const word of words) {
+      const next = cur ? cur + " " + word : word;
+      if (ctx.measureText(next).width <= w || !cur) cur = next;
+      else { lines.push(cur); cur = word; }
+    }
+    if (cur) lines.push(cur);
+    if (lines.length > MAX_LINES) {
+      const rest = lines.slice(MAX_LINES - 1).join(" ");
+      lines.length = MAX_LINES - 1;
+      lines.push(fit(ctx, rest, w));
+    }
+    return lines.map((l) => fit(ctx, l, w));
+  };
+
+  const rows = items.map((p) => {
+    const values = {
+      codFab: p.codFabricante || "", item: p.item, sku: p.codigo,
+      un: fmtNumber(p.needed), cx: p.cxMaster ? fmtNumber(p.needed / p.cxMaster) : "",
+      custo: fmtCurrency(custoNota(p)), valor: fmtCurrency(p.valorCompra),
+    };
+    const itemLines = wrap(measure, values.item, cols[1].w - 16);
+    return { values, itemLines, h: Math.max(MIN_ROW, itemLines.length * LINE_H + CELL_PAD * 2) };
+  });
+  const H = PAD + TITLE_H + HEAD_H + rows.reduce((acc, r) => acc + r.h, 0) + MIN_ROW + PAD;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W * S; canvas.height = H * S;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(S, S);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = "#2b2620"; ctx.font = font(18, 700); ctx.textBaseline = "alphabetic";
+  ctx.fillText(`Pedido de compra — ${fornecedor}`, PAD, PAD + 18);
+  ctx.fillStyle = "#6b6358"; ctx.font = font(12.5);
+  ctx.fillText(`${new Date().toLocaleDateString("pt-BR")} · ${items.length} itens · Total ${fmtCurrency(total)} (custo de nota)`, PAD, PAD + 40);
+
+  const drawRow = (y, h, values, { bold = false, bg = null, itemLines = null } = {}) => {
+    if (bg) { ctx.fillStyle = bg; ctx.fillRect(PAD, y, tableW, h); }
+    ctx.font = font(12, bold ? 700 : 400); ctx.fillStyle = "#2b2620"; ctx.textBaseline = "middle";
+    let x = PAD;
+    for (const c of cols) {
+      if (c.wrap && itemLines) {
+        ctx.textAlign = "left";
+        const top = y + (h - itemLines.length * LINE_H) / 2 + LINE_H / 2;
+        itemLines.forEach((line, i) => ctx.fillText(line, x + 8, top + i * LINE_H));
+      } else {
+        const t = fit(ctx, values[c.key] ?? "", c.w - 16);
+        ctx.textAlign = c.right ? "right" : "left";
+        ctx.fillText(t, c.right ? x + c.w - 8 : x + 8, y + h / 2);
+      }
+      x += c.w;
+    }
+    ctx.textAlign = "left";
+    ctx.strokeStyle = "#e6ddc9"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(PAD, y + h + 0.5); ctx.lineTo(PAD + tableW, y + h + 0.5); ctx.stroke();
+  };
+
+  let y = PAD + TITLE_H;
+  drawRow(y, HEAD_H, Object.fromEntries(cols.map((c) => [c.key, c.label])), { bold: true, bg: "#f3efe6" });
+  y += HEAD_H;
+  for (const r of rows) { drawRow(y, r.h, r.values, { itemLines: r.itemLines }); y += r.h; }
+  drawRow(y, MIN_ROW, { item: "TOTAL", valor: fmtCurrency(total) }, { bold: true, bg: "#faf7f0" });
+  return canvas;
+}
+
+// Tela "Gerar Pedido": só os itens com quantidade, pronta para enviar ao fornecedor
+function OrderSheet({ fornecedor, items, onClose, onExport }) {
+  const [copyState, setCopyState] = useState(null); // null | "copiando" | "ok" | "baixado" | erro
+  const total = items.reduce((acc, i) => acc + i.valorCompra, 0);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function copyPrint() {
+    setCopyState("copiando");
+    const canvas = drawOrderCanvas(fornecedor, items, total);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    try {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") throw new Error("sem suporte");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      setCopyState("ok");
+    } catch (e) {
+      // Navegador sem permissão para copiar imagem: baixa o PNG
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `pedido-${fornecedor.toLowerCase().replace(/\s+/g, "-")}-${new Date().toISOString().slice(0, 10)}.png`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setCopyState("baixado");
+    }
+    setTimeout(() => setCopyState(null), 3500);
+  }
+
+  return (
+    <div className="vivo-order-sheet-backdrop" onClick={onClose}>
+      <div className="vivo-order-sheet vivo-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`Pedido de compra — ${fornecedor}`}>
+        <div className="vivo-order-sheet-head">
+          <div>
+            <h2>Pedido de compra — {fornecedor}</h2>
+            <p>{new Date().toLocaleDateString("pt-BR")} · {items.length} itens · Total <strong>{fmtCurrency(total)}</strong> (custo de nota)</p>
+          </div>
+          <div className="vivo-order-sheet-actions">
+            {copyState === "ok" && <span className="vivo-order-sheet-msg">Imagem copiada — é só colar (Ctrl+V)</span>}
+            {copyState === "baixado" && <span className="vivo-order-sheet-msg">O navegador não deixou copiar; a imagem foi baixada</span>}
+            <button className="vivo-btn vivo-btn-primary" onClick={copyPrint} disabled={copyState === "copiando"}>{copyState === "copiando" ? "Gerando…" : "Copiar print"}</button>
+            <button className="vivo-btn vivo-btn-secondary" onClick={onExport}>Exportar Excel</button>
+            <button className="vivo-btn vivo-btn-ghost" onClick={onClose} title="Fechar (Esc)">Fechar</button>
+          </div>
+        </div>
+        <div className="vivo-table-wrap">
+          <table className="vivo-table vivo-table-compact">
+            <thead>
+              <tr>
+                <th>Cód. Fabricante</th>
+                <th>Item</th>
+                <th className="mono">SKU</th>
+                <th className="num">Unidades</th>
+                <th className="num">Caixas</th>
+                <th className="num">Custo nota</th>
+                <th className="num">Valor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((p) => (
+                <tr key={p.codigo}>
+                  <td className="mono">{p.codFabricante || "—"}</td>
+                  <td>{p.item}</td>
+                  <td className="mono">{p.codigo}</td>
+                  <td className="num mono">{fmtNumber(p.needed)}</td>
+                  <td className="num mono">{p.cxMaster ? fmtNumber(p.needed / p.cxMaster) : "—"}</td>
+                  <td className="num mono">{fmtCurrency(custoNota(p))}</td>
+                  <td className="num mono">{fmtCurrency(p.valorCompra)}</td>
+                </tr>
+              ))}
+              <tr className="vivo-order-sheet-total">
+                <td></td><td>TOTAL</td><td></td><td></td><td></td><td></td>
+                <td className="num mono">{fmtCurrency(total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3093,6 +3283,15 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
       <div className="vivo-supplier-kpis">
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">Estoque R$ (custo líq.)</span><span className="vivo-kpi-value">{fmtCurrency(estoqueTotal)}</span></div>
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">Capital em Excesso</span><span className="vivo-kpi-value vivo-kpi-danger">{fmtCurrency(capitalExcesso)}</span></div>
+        {(() => {
+          const pct = estoqueTotal > 0 ? (capitalExcesso / estoqueTotal) * 100 : 0;
+          return (
+            <div className="vivo-kpi-card" title="Capital em excesso ÷ estoque R$ da marca (valores atuais)">
+              <span className="vivo-kpi-label">Capital em Excesso %</span>
+              <span className={"vivo-kpi-value" + (pct > 10 ? " vivo-kpi-danger" : pct > 5 ? " vivo-kpi-warn" : " vivo-above-min")}>{pct.toFixed(1)}%</span>
+            </div>
+          );
+        })()}
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">SKUs Críticos (&lt;15d)</span><span className={"vivo-kpi-value" + (criticos > 0 ? " vivo-kpi-danger" : "")}>{criticos}</span></div>
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">SKUs em Excesso</span><span className={"vivo-kpi-value" + (excesso > 0 ? " vivo-kpi-warn" : "")}>{excesso}</span></div>
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">Total de SKUs</span><span className="vivo-kpi-value">{skus.length}</span></div>
@@ -4744,6 +4943,15 @@ const VIVO_CSS = `
 .vivo-dual-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .vivo-dual-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
 .vivo-dual-legend i.is-dashed { height: 0; border-top: 2px dashed; background: none !important; }
+.vivo-order-sheet-backdrop { position: fixed; inset: 0; background: rgba(35, 32, 23, 0.45); z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding: 32px 16px; overflow-y: auto; }
+.vivo-order-sheet { width: 100%; max-width: 1000px; padding: 20px 22px; box-sizing: border-box; }
+.vivo-order-sheet .vivo-table td:nth-child(2) { white-space: normal; min-width: 200px; }
+.vivo-order-sheet-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.vivo-order-sheet-head h2 { margin: 0 0 4px; font-size: 18px; color: var(--ink); }
+.vivo-order-sheet-head p { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+.vivo-order-sheet-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vivo-order-sheet-msg { font-size: 11.5px; color: var(--olive-dark); }
+.vivo-order-sheet-total td { font-weight: 700; background: var(--paper); }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
