@@ -2509,6 +2509,22 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
     };
   }, [lookup, products, data]);
 
+  // Série mensal da carteira: MC somada das marcas da carteira + estoque médio dos seus SKUs
+  const retornoSeries = useMemo(() => {
+    if (!data || !lookup) return [];
+    const prods = Object.values(products).filter(filter);
+    const keys = [...new Set(prods.map((p) => settings?.mcBrandMap?.[p.fornecedor] || mcNorm(p.fornecedor)))];
+    const stock = buildMonthlyAvgStock(prods);
+    return buildMcSeries(data, (m) => {
+      let fat = 0, mc = 0, found = false;
+      for (const k of keys) { const b = m.brands[k]; if (b) { found = true; fat += b.fat; mc += b.mc; } }
+      return found ? { fat, mc } : null;
+    }).map((s) => {
+      const st = stock[s.key];
+      return { ...s, avg: st ? st.avg : null, readings: st ? st.readings : 0, ret: s.has && st && st.avg > 0 ? s.mc / st.avg : null };
+    });
+  }, [data, lookup, products, filter, settings]);
+
   async function setManual(fornecedor, value) {
     const next = { ...(settings.carteiraManual || {}) };
     if (value) next[fornecedor] = value; else delete next[fornecedor];
@@ -2531,7 +2547,120 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
   }
   return (
     <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter}
-      notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />} />
+      notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />}
+      extraCharts={retornoSeries.some((s) => s.has) ? <CarteiraRetornoChart series={retornoSeries} carteira={carteira} /> : null} />
+  );
+}
+
+// Carteira: MC R$ do mês (barras, eixo esquerdo) e retorno sobre estoque (linha, eixo
+// direito) = MC R$ ÷ estoque médio do mês. Os rótulos de cada eixo usam a cor da série.
+const RET_COLOR = "#2a78d6";
+function CarteiraRetornoChart({ series, carteira }) {
+  const [wrapRef, width] = useElementWidth();
+  const [hover, setHover] = useState(null);
+  const W = Math.max(width, 280);
+  const PAD = { left: 70, right: 52 };
+  const n = series.length;
+  const band = n ? (W - PAD.left - PAD.right) / n : 1;
+  const cx = (i) => PAD.left + i * band + band / 2;
+  const H = 190, T = 14, B = 10;
+  const mcVals = series.map((s) => (s.has ? s.mc : 0));
+  let vMin = Math.min(0, ...mcVals), vMax = Math.max(1, ...mcVals);
+  const rVals = series.map((s) => s.ret).filter((r) => r !== null && isFinite(r));
+  let rMin = Math.min(0, ...rVals), rMax = Math.max(0.01, ...rVals);
+  // Os dois eixos compartilham a posição do zero, para barras e linha partirem da mesma base
+  const negFrac = Math.max(vMin < 0 ? -vMin / (vMax - vMin) : 0, rMin < 0 ? -rMin / (rMax - rMin) : 0);
+  if (negFrac > 0) { vMin = -negFrac / (1 - negFrac) * vMax; rMin = -negFrac / (1 - negFrac) * rMax; }
+  vMax *= 1.1; rMax *= 1.1; vMin *= 1.1; rMin *= 1.1;
+  const yV = (v) => T + (H - T - B) * (1 - (v - vMin) / (vMax - vMin));
+  const yR = (r) => T + (H - T - B) * (1 - (r - rMin) / (rMax - rMin));
+  const bw = Math.max(6, Math.min(30, band * 0.5));
+  const barPath = (i, v) => {
+    const x0 = cx(i) - bw / 2, x1 = cx(i) + bw / 2, y0 = yV(0), y1 = yV(v);
+    const r = Math.min(4, Math.abs(y1 - y0), bw / 2);
+    if (Math.abs(y1 - y0) < 0.5) return "";
+    if (v >= 0) return `M${x0},${y0} L${x0},${y1 + r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 + r} L${x1},${y0} Z`;
+    return `M${x0},${y0} L${x0},${y1 - r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 - r} L${x1},${y0} Z`;
+  };
+  const ticks = [1, 0.5];
+  function onMove(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const i = Math.floor((e.clientX - rect.left - PAD.left) / band);
+    setHover(i >= 0 && i < n ? i : null);
+  }
+  const h = hover !== null ? series[hover] : null;
+  const tipLeft = hover !== null && cx(hover) < W * 0.6;
+  const last = [...series].reverse().find((s) => s.ret !== null && !s.provisional) || null;
+
+  return (
+    <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 20 }}>
+      <div className="vivo-minichart-header">
+        <span className="vivo-capital-chart-label" title="Retorno sobre estoque = MC R$ do mês ÷ estoque médio do mês (custo líquido). Também chamado de CMROI.">
+          MC R$ e retorno sobre estoque — carteira {carteira}
+        </span>
+        {last && (
+          <span className="vivo-minichart-current" style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+            <span style={{ fontSize: 11, color: "var(--ink-soft)" }}>{last.fullLabel}</span>
+            <span style={{ color: "var(--olive-dark)" }}><strong>{fmtCurrency(last.mc)}</strong></span>
+            <span style={{ color: RET_COLOR }}><strong>{fmtPct(last.ret)}</strong> <span style={{ fontSize: 11 }}>s/ estoque</span></span>
+          </span>
+        )}
+      </div>
+      <div className="vivo-dual-legend">
+        <span><i style={{ background: "var(--olive-dark)", height: 8, width: 10 }} />MC R$ (eixo esq.)</span>
+        <span><i style={{ background: RET_COLOR }} />Retorno sobre estoque no mês (eixo dir.)</span>
+      </div>
+      <div ref={wrapRef} className="vivo-mc-panels" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        {width > 0 && (<>
+          <svg width={W} height={H} style={{ display: "block" }}>
+            {hover !== null && <rect x={PAD.left + hover * band} y={0} width={band} height={H} fill="var(--ink)" opacity="0.045" />}
+            {ticks.map((t) => (
+              <g key={t}>
+                <line x1={PAD.left} x2={W - PAD.right} y1={yV(t * vMax / 1.1)} y2={yV(t * vMax / 1.1)} stroke="var(--line)" strokeDasharray="3,3" />
+                <text x={PAD.left - 8} y={yV(t * vMax / 1.1) + 3} fontSize="10" fill="var(--olive-dark)" textAnchor="end">{fmtCompactBRL(t * vMax / 1.1)}</text>
+                <text x={W - PAD.right + 8} y={yR(t * rMax / 1.1) + 3} fontSize="10" fill={RET_COLOR} textAnchor="start">{fmtPct(t * rMax / 1.1)}</text>
+              </g>
+            ))}
+            <line x1={PAD.left} x2={W - PAD.right} y1={yV(0)} y2={yV(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
+            <text x={PAD.left - 8} y={yV(0) + 3} fontSize="10" fill="var(--olive-dark)" textAnchor="end">0</text>
+            <text x={W - PAD.right + 8} y={yV(0) + 3} fontSize="10" fill={RET_COLOR} textAnchor="start">0%</text>
+            {series.map((s, i) => {
+              if (!s.has) return null;
+              const col = s.mc < 0 ? "var(--rust)" : "var(--olive-dark)";
+              return <path key={s.key} d={barPath(i, s.mc)} fill={col} fillOpacity={s.provisional ? 0.35 : 0.9} stroke={s.provisional ? col : "none"} strokeDasharray={s.provisional ? "3,2" : undefined} />;
+            })}
+            {series.map((s, i) => {
+              if (i === 0 || s.ret === null || series[i - 1].ret === null) return null;
+              return <line key={s.key} x1={cx(i - 1)} y1={yR(series[i - 1].ret)} x2={cx(i)} y2={yR(s.ret)} stroke={RET_COLOR} strokeWidth="2" strokeLinecap="round" strokeDasharray={s.provisional ? "4,3" : undefined} />;
+            })}
+            {series.map((s, i) => s.ret === null ? null : (
+              <circle key={s.key} cx={cx(i)} cy={yR(s.ret)} r={hover === i ? 5 : 4} fill={s.provisional ? "var(--card)" : RET_COLOR} stroke={s.provisional ? RET_COLOR : "var(--card)"} strokeWidth="2" />
+            ))}
+          </svg>
+          <svg width={W} height={20} style={{ display: "block" }}>
+            {series.map((s, i) => (
+              mcShowMonthLabel(i, n, band, hover) && <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i ? 600 : 400} textAnchor="middle">{s.label}</text>
+            ))}
+          </svg>
+          {h && (
+            <div className="vivo-chart-tooltip" style={{ top: 10, left: tipLeft ? cx(hover) + band / 2 + 6 : "auto", right: tipLeft ? "auto" : W - cx(hover) + band / 2 + 6 }}>
+              <div className="vivo-chart-tooltip-date">{h.fullLabel}{h.provisional ? " · em andamento" : ""}</div>
+              {!h.has ? <div className="vivo-chart-tooltip-delta">Sem MC no mês</div> : (<>
+                <div className="vivo-mc-tip-row"><span>MC R$</span><b style={{ color: h.mc < 0 ? "#f0a08a" : undefined }}>{fmtCurrency(h.mc)}</b></div>
+                <div className="vivo-mc-tip-row"><span>MC %</span><b>{fmtPct(h.pct)}</b></div>
+                <div className="vivo-mc-tip-row"><span>Estoque médio</span><b>{h.avg !== null ? fmtCurrency(h.avg) : "sem leitura"}</b></div>
+                <div className="vivo-mc-tip-row"><span>Retorno s/ estoque</span><b>{fmtPct(h.ret)}</b></div>
+                {h.avg !== null && <div className="vivo-chart-tooltip-delta" style={{ color: "#a39c8a" }}>{h.readings === 0 ? "sem importação no mês (usa a última leitura)" : `${h.readings} leitura(s) de estoque no mês`}</div>}
+              </>)}
+            </div>
+          )}
+        </>)}
+      </div>
+      <div className="vivo-mc-note">
+        Retorno sobre estoque = MC R$ do mês ÷ estoque médio do mês (custo líquido, ponderado pelo tempo entre as importações do relatório).
+        Considera só os fornecedores da carteira que existem no Vívora; meses sem leitura de estoque ficam sem retorno.
+      </div>
+    </div>
   );
 }
 
@@ -2618,6 +2747,50 @@ function useMcData() {
   return { ...state, reload: () => load(true) };
 }
 
+// Estoque médio (R$, custo líquido) por mês "AAAA-MM", ponderado pelo tempo entre
+// leituras: cada importação do relatório gera uma leitura (salesHistory) e o valor dela
+// vale até a próxima. Inclui SKUs hoje inativos — o estoque deles contou no passado.
+// Devolve { "AAAA-MM": { avg, readings } } (readings = importações dentro do mês).
+function buildMonthlyAvgStock(productList, now = Date.now()) {
+  const byDay = {};
+  for (const p of productList) {
+    for (const snap of p.salesHistory || []) {
+      const dk = dayKey(snap.ts);
+      const d = byDay[dk] || (byDay[dk] = { ts: snap.ts, items: {} });
+      const prev = d.items[p.codigo];
+      if (!prev || snap.ts > prev.ts) {
+        const custo = snap.custoLiquido || snap.precoCusto || custoLiq(p);
+        d.items[p.codigo] = { ts: snap.ts, v: (snap.estoque ?? 0) * custo };
+      }
+      if (snap.ts > d.ts) d.ts = snap.ts;
+    }
+  }
+  const pts = Object.values(byDay)
+    .map((d) => ({ ts: d.ts, v: Object.values(d.items).reduce((acc, i) => acc + i.v, 0) }))
+    .sort((a, b) => a.ts - b.ts);
+  const out = {};
+  if (!pts.length) return out;
+  const first = new Date(pts[0].ts);
+  for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m.getTime() <= now; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+    const mStart = m.getTime(), mEnd = Math.min(new Date(m.getFullYear(), m.getMonth() + 1, 1).getTime(), now);
+    const start = Math.max(mStart, pts[0].ts);
+    if (mEnd <= start) continue;
+    let i = 0;
+    while (i + 1 < pts.length && pts[i + 1].ts <= start) i++;
+    let t = start, area = 0, readings = 0;
+    while (t < mEnd) {
+      const nextTs = i + 1 < pts.length ? Math.min(pts[i + 1].ts, mEnd) : mEnd;
+      area += pts[i].v * (nextTs - t);
+      t = nextTs;
+      if (i + 1 < pts.length && pts[i + 1].ts <= t && t < mEnd) i++;
+    }
+    for (const p of pts) if (p.ts >= mStart && p.ts < mEnd) readings++;
+    const key = `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, "0")}`;
+    out[key] = { avg: area / (mEnd - start), readings };
+  }
+  return out;
+}
+
 // Série mensal (últimos 12 meses disponíveis) a partir de um "pick" por mês
 function buildMcSeries(data, pick) {
   if (!data || !data.months || !data.months.length) return [];
@@ -2659,7 +2832,9 @@ function useElementWidth() {
 
 // Dois painéis alinhados pelo mês: barras (R$) em cima, MC embaixo (R$ por padrão, opcional em %).
 // Escalas separadas de propósito — nunca dois eixos no mesmo gráfico.
-function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
+// stock (opcional): estoque médio por mês (buildMonthlyAvgStock) — habilita a opção
+// "Retorno s/ estoque" = MC R$ do mês ÷ estoque médio do mês.
+function McMonthlyPanels({ series, barKey, barTitle, showUnits, stock = null }) {
   const [wrapRef, width] = useElementWidth();
   const [hover, setHover] = useState(null);
   const [metric, setMetric] = useState("mc");
@@ -2688,13 +2863,18 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
 
   // Painel de MC (R$ ou %)
   const LH = 96, LT = 14, LB = 8;
+  const retOf = (s) => {
+    const st = stock && stock[s.key];
+    return s.has && st && st.avg > 0 ? s.mc / st.avg : null;
+  };
   const mcv = (s) => metric === "pct"
     ? (s.pct !== null && isFinite(s.pct) ? s.pct : null)
+    : metric === "ret" ? retOf(s)
     : (s.has && isFinite(s.mc) ? s.mc : null);
-  const fmtLine = metric === "pct" ? fmtPct : fmtCompactBRL;
+  const fmtLine = metric === "mc" ? fmtCompactBRL : fmtPct;
   const pVals = series.map(mcv).filter((p) => p !== null);
   let pMin = Math.min(0, ...(pVals.length ? pVals : [0]));
-  let pMax = Math.max(metric === "pct" ? 0.05 : 1, ...(pVals.length ? pVals : [0]));
+  let pMax = Math.max(metric === "mc" ? 1 : 0.05, ...(pVals.length ? pVals : [0]));
   const pPad = (pMax - pMin) * 0.12;
   pMax += pPad; if (pMin < 0) pMin -= pPad;
   const py = (p) => LT + (LH - LT - LB) * (1 - (p - pMin) / (pMax - pMin));
@@ -2744,22 +2924,25 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
           <text x={PAD.left - 8} y={by(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0</text>
         </svg>
         <div className="vivo-mc-line-head">
-          <span className="vivo-mc-panel-title" style={{ margin: 0 }}>{metric === "pct" ? "MC %" : "MC R$"}</span>
+          <span className="vivo-mc-panel-title" style={{ margin: 0 }} title={metric === "ret" ? "MC R$ do mês ÷ estoque médio do mês (custo líquido) — CMROI mensal" : undefined}>
+            {metric === "pct" ? "MC %" : metric === "ret" ? "Retorno s/ estoque (MC ÷ estoque médio)" : "MC R$"}
+          </span>
           <div className="vivo-mc-seg">
             <button className={metric === "mc" ? "is-active" : ""} onClick={() => setMetric("mc")}>MC R$</button>
             <button className={metric === "pct" ? "is-active" : ""} onClick={() => setMetric("pct")}>MC %</button>
+            {stock && <button className={metric === "ret" ? "is-active" : ""} onClick={() => setMetric("ret")}>Retorno s/ estoque</button>}
           </div>
         </div>
         <svg width={W} height={LH} style={{ display: "block" }}>
           {bandHighlight(LH)}
-          {[pMax - pPad, pMin < 0 ? pMin + pPad : null].filter((v) => v !== null && v !== 0).map((v, k) => (
+          {[pMax - pPad, pMin < 0 ? pMin + pPad : null].filter((v) => v !== null && v !== 0 && Math.abs(py(v) - py(0)) > 12).map((v, k) => (
             <g key={k}>
               <line x1={PAD.left} x2={W - PAD.right} y1={py(v)} y2={py(v)} stroke="var(--line)" strokeDasharray="3,3" />
               <text x={PAD.left - 8} y={py(v) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtLine(v)}</text>
             </g>
           ))}
           <line x1={PAD.left} x2={W - PAD.right} y1={py(0)} y2={py(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
-          <text x={PAD.left - 8} y={py(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{metric === "pct" ? "0%" : "0"}</text>
+          <text x={PAD.left - 8} y={py(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{metric === "mc" ? "0" : "0%"}</text>
           {segs.map((seg, k) => seg.length > 1 && seg.slice(1).map((p, j) => (
             <line key={`${k}-${j}`} x1={seg[j][0]} y1={seg[j][1]} x2={p[0]} y2={p[1]} stroke="var(--amber)" strokeWidth="2" strokeLinecap="round" strokeDasharray={p[2] ? "4,3" : undefined} />
           )))}
@@ -2783,6 +2966,16 @@ function McMonthlyPanels({ series, barKey, barTitle, showUnits }) {
               <div className="vivo-mc-tip-row"><span>MC R$</span><b style={{ color: h.mc < 0 ? "#f0a08a" : undefined }}>{fmtCurrency(h.mc)}</b></div>
               <div className="vivo-mc-tip-row"><span>MC %</span><b>{fmtPct(h.pct)}</b></div>
               {showUnits && <div className="vivo-mc-tip-row"><span>Unidades</span><b>{fmtNumber(h.un)}</b></div>}
+              {stock && (() => {
+                const st = stock[h.key];
+                if (!st) return <div className="vivo-mc-tip-row"><span>Estoque médio</span><b>sem leitura</b></div>;
+                const ret = retOf(h);
+                return (<>
+                  <div className="vivo-mc-tip-row"><span>Estoque médio</span><b>{fmtCurrency(st.avg)}</b></div>
+                  <div className="vivo-mc-tip-row"><span>Retorno s/ estoque</span><b>{fmtPct(ret)}</b></div>
+                  <div className="vivo-chart-tooltip-delta" style={{ color: "#a39c8a" }}>{st.readings === 0 ? "sem importação no mês (usa a última leitura)" : `${st.readings} leitura(s) de estoque no mês`}</div>
+                </>);
+              })()}
             </>)}
           </div>
         )}
@@ -2965,7 +3158,7 @@ function McStatusLine({ loading, error, data, reload }) {
 }
 
 // Seção da marca/fornecedor: gráfico + tabela mensal + quebra por canal
-function McBrandSection({ fornecedor, settings, persistSettings }) {
+function McBrandSection({ fornecedor, settings, persistSettings, products = null }) {
   const { loading, data, error, reload } = useMcData();
   const [openMonth, setOpenMonth] = useState(null);
   const [linkChoice, setLinkChoice] = useState("");
@@ -2980,6 +3173,7 @@ function McBrandSection({ fornecedor, settings, persistSettings }) {
   }, [data]);
   const found = series.some((s) => s.has);
   const labels = (data && data.channelLabels) || {};
+  const brandStock = useMemo(() => (products ? buildMonthlyAvgStock(Object.values(products).filter((p) => p.fornecedor === fornecedor)) : null), [products, fornecedor]);
 
   async function saveLink(value) {
     if (!persistSettings) return;
@@ -3009,7 +3203,7 @@ function McBrandSection({ fornecedor, settings, persistSettings }) {
         </div>
       )}
       {data && found && (<>
-        <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" />
+        <McMonthlyPanels series={series} barKey="fat" barTitle="Faturamento" stock={brandStock} />
         <McChannelChart series={series} labels={labels} />
         <table className="vivo-table vivo-table-compact vivo-mc-table">
           <thead>
@@ -3310,7 +3504,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
         <div className="vivo-supplier-chart-block vivo-card">
           <MiniLineChart series={salesSeries} valueKey="total" color="#4a7c6f" unit="un" title={salesSeries.length >= 2 ? `Vendas 30D — ${fmtDateShort(salesSeries[0].ts)} a ${fmtDateShort(salesSeries[salesSeries.length-1].ts)}` : "Vendas 30D totais"} />
         </div>
-        {tag !== "inativo" && <McBrandSection fornecedor={fornecedor} settings={settings} persistSettings={persistSettings} />}
+        {tag !== "inativo" && <McBrandSection fornecedor={fornecedor} settings={settings} persistSettings={persistSettings} products={products} />}
       </div>
 
       <div style={{ marginTop: 18 }}>
@@ -3746,7 +3940,7 @@ function MiniLineChart({ series, valueKey, color, unit, title }) {
 }
 
 // ====================== OVERVIEW TAB ======================
-function OverviewTab({ products: allProducts, persistProducts, settings, carteira = null, filter = null, notice = null }) {
+function OverviewTab({ products: allProducts, persistProducts, settings, carteira = null, filter = null, notice = null, extraCharts = null }) {
   // Visão por carteira: mesma tela, calculada só com os produtos da carteira.
   // O painel do SKU continua recebendo todos os produtos (ele grava o objeto inteiro).
   const products = useMemo(() => (
@@ -3907,6 +4101,8 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
             : "Capital excedente total (>90d de cobertura)"}
         />
       </div>
+
+      {extraCharts}
 
       {/* Filtro de validade */}
       <div className="vivo-toolbar" style={{ marginBottom: 10 }}>
