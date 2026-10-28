@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import {
   Upload, Package, ShoppingCart, Search,
   ChevronDown, ChevronRight, AlertTriangle, CheckCircle2,
-  Settings, FileSpreadsheet, History, Trash2, Box, TrendingUp, TrendingDown, Minus
+  Settings, FileSpreadsheet, History, Trash2, Box, TrendingUp, TrendingDown, Minus, BarChart3, ExternalLink
 } from "lucide-react";
 
 const K_PRODUCTS = "vivo:products";
@@ -772,6 +772,7 @@ export default function App() {
         {mainTab === "qualidade" && subTab === "monitorados" && (
           <MonitoredTab products={viewProducts} persistProducts={persistViewProducts} />
         )}
+        {mainTab === "indicadores" && subTab === "reembolso-lv" && <ReembolsoLvTab />}
       </main>
     </div>
   );
@@ -817,6 +818,16 @@ const NAV_STRUCTURE = [
       { id: "prices", label: "Tabela de preços" },
       { id: "history", label: "Histórico de importações" },
       { id: "cleanup", label: "Limpeza de itens" },
+    ],
+  },
+  {
+    // Indicadores por área. Para uma nova subaba (Atendimento, Comercial, Financeiro…):
+    // acrescente o item aqui e a rota correspondente em App (mainTab === "indicadores").
+    id: "indicadores",
+    label: "Indicadores",
+    icon: BarChart3,
+    subItems: [
+      { id: "reembolso-lv", label: "Reembolso LV" },
     ],
   },
 ];
@@ -2412,6 +2423,291 @@ function OrderSheet({ fornecedor, items, onClose, onExport }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ====================== INDICADORES — REEMBOLSO LV ======================
+// Dados vêm de /api/reembolsos (função no Vercel que lê a lista "Reembolso" do ClickUp,
+// só tarefas com Canal de Venda = Loja Virtual). Reembolso feito = tarefa concluída,
+// com a data de conclusão; tarefas abertas são pendentes.
+function useApiData(url) {
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+  const load = useCallback((force) => {
+    setState((st) => ({ ...st, loading: true, error: null }));
+    fetch(url, force ? { cache: "no-store" } : undefined)
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `Erro ${r.status}`);
+        return j;
+      })
+      .then((data) => setState({ loading: false, data, error: null }))
+      .catch((e) => setState({ loading: false, data: null, error: String(e.message || e) }));
+  }, [url]);
+  useEffect(() => { load(false); }, [load]);
+  return { ...state, reload: () => load(true) };
+}
+
+function monthKeyOf(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// Tag com a cor da opção no ClickUp (fundo claro, texto escuro)
+function ClickupTag({ opt }) {
+  if (!opt) return <span style={{ color: "#bbb" }}>—</span>;
+  const c = opt.color || "#87909e";
+  return <span className="vivo-cu-tag" style={{ background: c + "22", borderColor: c + "66" }}><i style={{ background: c }} />{opt.name}</span>;
+}
+
+// Barras horizontais simples (lista de categorias do mês)
+function BreakdownBars({ rows, format }) {
+  const max = Math.max(...rows.map((r) => r.value), 0) || 1;
+  if (!rows.length) return <div className="vivo-mc-note" style={{ marginTop: 0 }}>Nada no mês.</div>;
+  return (
+    <div className="vivo-breakdown">
+      {rows.map((r) => (
+        <div key={r.label} className="vivo-breakdown-row">
+          <span className="vivo-breakdown-label" title={r.label}>{r.label}</span>
+          <span className="vivo-breakdown-track"><i style={{ width: `${(r.value / max) * 100}%`, background: r.color || "var(--olive-dark)" }} /></span>
+          <span className="vivo-breakdown-value">{format(r.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Valor reembolsado e prejuízo, mês a mês (mesma unidade: um eixo só, barras lado a lado)
+const REEMB_COLORS = { reembolso: "#2a78d6", prejuizo: "#eb6834" };
+function ReembolsoMonthlyChart({ series }) {
+  const [wrapRef, width] = useElementWidth();
+  const [hover, setHover] = useState(null);
+  const W = Math.max(width, 280), H = 170, T = 12, B = 8;
+  const PAD = { left: 64, right: 16 };
+  const n = series.length;
+  const band = n ? (W - PAD.left - PAD.right) / n : 1;
+  const cx = (i) => PAD.left + i * band + band / 2;
+  const max = Math.max(1, ...series.map((s) => Math.max(s.reembolso, s.prejuizo))) * 1.1;
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const bw = Math.max(6, Math.min(22, band * 0.28));
+  const bar = (xc, v) => {
+    const x0 = xc - bw / 2, x1 = xc + bw / 2, y0 = y(0), y1 = y(v), r = Math.min(4, Math.abs(y0 - y1), bw / 2);
+    if (y0 - y1 < 0.5) return "";
+    return `M${x0},${y0} L${x0},${y1 + r} Q${x0},${y1} ${x0 + r},${y1} L${x1 - r},${y1} Q${x1},${y1} ${x1},${y1 + r} L${x1},${y0} Z`;
+  };
+  function onMove(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const i = Math.floor((e.clientX - rect.left - PAD.left) / band);
+    setHover(i >= 0 && i < n ? i : null);
+  }
+  const h = hover !== null ? series[hover] : null;
+  const tipLeft = hover !== null && cx(hover) < W * 0.6;
+  return (
+    <div>
+      <div className="vivo-dual-legend">
+        <span><i style={{ background: REEMB_COLORS.reembolso, height: 8, width: 10 }} />Valor reembolsado</span>
+        <span><i style={{ background: REEMB_COLORS.prejuizo, height: 8, width: 10 }} />Prejuízo (frete + produto)</span>
+      </div>
+      <div ref={wrapRef} className="vivo-mc-panels" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        {width > 0 && (<>
+          <svg width={W} height={H} style={{ display: "block" }}>
+            {hover !== null && <rect x={PAD.left + hover * band} y={0} width={band} height={H} fill="var(--ink)" opacity="0.045" />}
+            {[1, 0.5].map((t) => (
+              <g key={t}>
+                <line x1={PAD.left} x2={W - PAD.right} y1={y(t * max / 1.1)} y2={y(t * max / 1.1)} stroke="var(--line)" strokeDasharray="3,3" />
+                <text x={PAD.left - 8} y={y(t * max / 1.1) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">{fmtCompactBRL(t * max / 1.1)}</text>
+              </g>
+            ))}
+            <line x1={PAD.left} x2={W - PAD.right} y1={y(0)} y2={y(0)} stroke="var(--ink-soft)" strokeWidth="1" opacity="0.5" />
+            <text x={PAD.left - 8} y={y(0) + 3} fontSize="10" fill="var(--ink-soft)" textAnchor="end">0</text>
+            {series.map((s, i) => (
+              <g key={s.key}>
+                <path d={bar(cx(i) - bw / 2 - 1, s.reembolso)} fill={REEMB_COLORS.reembolso} />
+                <path d={bar(cx(i) + bw / 2 + 1, s.prejuizo)} fill={REEMB_COLORS.prejuizo} />
+              </g>
+            ))}
+          </svg>
+          <svg width={W} height={20} style={{ display: "block" }}>
+            {series.map((s, i) => (
+              <text key={s.key} x={cx(i)} y={13} fontSize="10" fill={hover === i || s.selected ? "var(--ink)" : "var(--ink-soft)"} fontWeight={hover === i || s.selected ? 600 : 400} textAnchor="middle">{s.label}</text>
+            ))}
+          </svg>
+          {h && (
+            <div className="vivo-chart-tooltip" style={{ top: 10, left: tipLeft ? cx(hover) + band / 2 + 6 : "auto", right: tipLeft ? "auto" : W - cx(hover) + band / 2 + 6 }}>
+              <div className="vivo-chart-tooltip-date">{h.fullLabel}</div>
+              <div className="vivo-mc-tip-row"><span>Reembolsos</span><b>{h.count}</b></div>
+              <div className="vivo-mc-tip-row"><span>Valor reembolsado</span><b>{fmtCurrency(h.reembolso)}</b></div>
+              <div className="vivo-mc-tip-row"><span>Prejuízo</span><b>{fmtCurrency(h.prejuizo)}</b></div>
+            </div>
+          )}
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+function ReembolsoLvTab() {
+  const { loading, data, error, reload } = useApiData("/api/reembolsos");
+  const nowKey = monthKeyOf(Date.now());
+  const [month, setMonth] = useState(nowKey);
+  const items = (data && data.items) || [];
+  const concluidos = useMemo(() => items.filter((i) => i.closed && i.dateClosed), [items]);
+  const pendentes = useMemo(() => items.filter((i) => !i.closed).sort((a, b) => (a.dateCreated || 0) - (b.dateCreated || 0)), [items]);
+
+  // Meses do seletor: do primeiro reembolso até o mês atual
+  const monthOptions = useMemo(() => {
+    const keys = concluidos.map((i) => monthKeyOf(i.dateClosed)).sort();
+    const first = keys[0] || nowKey;
+    const out = [];
+    let [y, m] = first.split("-").map(Number);
+    for (;;) {
+      const k = `${y}-${String(m).padStart(2, "0")}`;
+      out.push(k);
+      if (k >= nowKey) break;
+      m++; if (m > 12) { m = 1; y++; }
+    }
+    return out.reverse();
+  }, [concluidos, nowKey]);
+
+  const doMes = useMemo(() => concluidos.filter((i) => monthKeyOf(i.dateClosed) === month).sort((a, b) => b.dateClosed - a.dateClosed), [concluidos, month]);
+  const soma = (list, k) => list.reduce((acc, i) => acc + (i[k] || 0), 0);
+  const valorMes = soma(doMes, "reembolso");
+  const prejFrete = soma(doMes, "prejuizoFrete"), prejProduto = soma(doMes, "prejuizoProduto");
+
+  // Últimos 6 meses terminando no mês escolhido
+  const series = useMemo(() => {
+    const [y, m] = month.split("-").map(Number);
+    return Array.from({ length: 6 }, (_, k) => {
+      const d = new Date(y, m - 1 - (5 - k), 1);
+      const key = monthKeyOf(d.getTime());
+      const list = concluidos.filter((i) => monthKeyOf(i.dateClosed) === key);
+      return { key, label: mcMonthLabel(key, false), fullLabel: mcMonthLabel(key, true), selected: key === month,
+        count: list.length, reembolso: soma(list, "reembolso"), prejuizo: soma(list, "prejuizo") };
+    });
+  }, [concluidos, month]);
+
+  const group = (list, field, valueOf) => {
+    const map = {};
+    for (const i of list) {
+      const opt = i[field];
+      const label = opt ? opt.name : "Não informado";
+      const g = map[label] || (map[label] = { label, value: 0, color: opt ? opt.color : "#c9c2b4" });
+      g.value += valueOf(i);
+    }
+    return Object.values(map).filter((g) => g.value > 0).sort((a, b) => b.value - a.value);
+  };
+  const porResp = group(doMes, "responsabilidade", (i) => i.prejuizo);
+  const porMotivo = group(doMes, "motivo", () => 1);
+  const fmtDia = (ts) => new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+
+  return (
+    <div className="vivo-page">
+      <header className="vivo-page-head">
+        <h1>Reembolso LV</h1>
+        <p>Reembolsos da loja virtual (Natueu), da lista “Reembolso” do ClickUp. Data do reembolso = conclusão da tarefa.</p>
+      </header>
+
+      <div className="vivo-toolbar" style={{ marginBottom: 14, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <label className="vivo-period-select">
+          Mês:
+          <select className="vivo-select" value={month} onChange={(e) => setMonth(e.target.value)}>
+            {monthOptions.map((k) => <option key={k} value={k}>{mcMonthLabel(k, true)}{k === nowKey ? " (atual)" : ""}</option>)}
+          </select>
+        </label>
+        {data && <span className="vivo-mc-note" style={{ margin: 0 }}>Atualizado às {new Date(data.generatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} · <a href="#" onClick={(e) => { e.preventDefault(); reload(); }}>atualizar</a></span>}
+      </div>
+
+      {loading && !data && <div className="vivo-mc-note">Carregando reembolsos do ClickUp…</div>}
+      {error && <div className="vivo-mc-note vivo-mc-error">Não foi possível carregar os reembolsos: {error} <button className="vivo-btn" style={{ marginLeft: 8, padding: "2px 8px", fontSize: 11 }} onClick={reload}>Tentar de novo</button></div>}
+
+      {data && (<>
+        <div className="vivo-supplier-kpis" style={{ marginBottom: 20 }}>
+          <div className="vivo-kpi-card"><span className="vivo-kpi-label">Reembolsos no mês</span><span className="vivo-kpi-value">{doMes.length}</span></div>
+          <div className="vivo-kpi-card"><span className="vivo-kpi-label">Valor reembolsado</span><span className="vivo-kpi-value">{fmtCurrency(valorMes)}</span></div>
+          <div className="vivo-kpi-card" title={`Frete ${fmtCurrency(prejFrete)} · Produto ${fmtCurrency(prejProduto)}`}>
+            <span className="vivo-kpi-label">Prejuízo (frete + produto)</span>
+            <span className={"vivo-kpi-value" + (prejFrete + prejProduto > 0 ? " vivo-kpi-danger" : "")}>{fmtCurrency(prejFrete + prejProduto)}</span>
+            <span className="vivo-kpi-sub">Frete {fmtCurrency(prejFrete)} · Produto {fmtCurrency(prejProduto)}</span>
+          </div>
+          <div className="vivo-kpi-card" title="Tarefas ainda abertas (aguardando ou divergência), de qualquer mês">
+            <span className="vivo-kpi-label">Pendentes em aberto</span>
+            <span className={"vivo-kpi-value" + (pendentes.length > 0 ? " vivo-kpi-warn" : "")}>{pendentes.length}</span>
+          </div>
+        </div>
+
+        <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 16 }}>
+          <div className="vivo-minichart-header"><span className="vivo-capital-chart-label">Valor reembolsado e prejuízo — últimos 6 meses</span></div>
+          <ReembolsoMonthlyChart series={series} />
+        </div>
+
+        <div className="vivo-indicator-grid">
+          <div className="vivo-card vivo-indicator-box">
+            <div className="vivo-capital-chart-label" style={{ marginBottom: 10 }}>Prejuízo por responsabilidade — {mcMonthLabel(month, true)}</div>
+            <BreakdownBars rows={porResp} format={fmtCurrency} />
+          </div>
+          <div className="vivo-card vivo-indicator-box">
+            <div className="vivo-capital-chart-label" style={{ marginBottom: 10 }}>Reembolsos por motivo — {mcMonthLabel(month, true)}</div>
+            <BreakdownBars rows={porMotivo} format={(v) => String(v)} />
+          </div>
+        </div>
+
+        <div className="vivo-capital-chart-label" style={{ margin: "20px 0 8px" }}>Reembolsos de {mcMonthLabel(month, true)} ({doMes.length})</div>
+        <div className="vivo-table-wrap vivo-card">
+          <table className="vivo-table vivo-table-compact">
+            <thead>
+              <tr>
+                <th className="num">Data</th>
+                <th>Cliente</th>
+                <th className="mono">Pedido</th>
+                <th>Motivo</th>
+                <th>Responsabilidade</th>
+                <th className="num">Reembolso</th>
+                <th className="num">Prejuízo</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {doMes.map((i) => (
+                <tr key={i.id}>
+                  <td className="num mono">{fmtDia(i.dateClosed)}</td>
+                  <td>{i.cliente}</td>
+                  <td className="mono">{i.pedido || "—"}</td>
+                  <td><ClickupTag opt={i.motivo} /></td>
+                  <td><ClickupTag opt={i.responsabilidade} /></td>
+                  <td className="num mono">{fmtCurrency(i.reembolso)}</td>
+                  <td className={"num mono" + (i.prejuizo > 0 ? " vivo-below-min" : "")} title={i.prejuizo > 0 ? `Frete ${fmtCurrency(i.prejuizoFrete)} · Produto ${fmtCurrency(i.prejuizoProduto)}` : undefined}>{i.prejuizo > 0 ? fmtCurrency(i.prejuizo) : "—"}</td>
+                  <td className="num"><a href={i.url} target="_blank" rel="noopener noreferrer" className="vivo-cu-link" title="Abrir tarefa no ClickUp">ClickUp <ExternalLink size={11} /></a></td>
+                </tr>
+              ))}
+              {doMes.length === 0 && <tr><td colSpan={8} className="vivo-table-empty">Nenhum reembolso concluído em {mcMonthLabel(month, true)}.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+
+        {pendentes.length > 0 && (
+          <details className="vivo-cu-pendentes">
+            <summary>Pendentes em aberto ({pendentes.length})</summary>
+            <div className="vivo-table-wrap vivo-card" style={{ marginTop: 8 }}>
+              <table className="vivo-table vivo-table-compact">
+                <thead><tr><th className="num">Aberto em</th><th>Cliente</th><th className="mono">Pedido</th><th>Status</th><th>Motivo</th><th className="num">Reembolso</th><th></th></tr></thead>
+                <tbody>
+                  {pendentes.map((i) => (
+                    <tr key={i.id}>
+                      <td className="num mono">{i.dateCreated ? fmtDia(i.dateCreated) : "—"}</td>
+                      <td>{i.cliente}</td>
+                      <td className="mono">{i.pedido || "—"}</td>
+                      <td><ClickupTag opt={{ name: i.status, color: i.statusColor && i.statusColor.startsWith("#") ? i.statusColor : "#87909e" }} /></td>
+                      <td><ClickupTag opt={i.motivo} /></td>
+                      <td className="num mono">{i.reembolso ? fmtCurrency(i.reembolso) : "—"}</td>
+                      <td className="num"><a href={i.url} target="_blank" rel="noopener noreferrer" className="vivo-cu-link" title="Abrir tarefa no ClickUp">ClickUp <ExternalLink size={11} /></a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+      </>)}
     </div>
   );
 }
@@ -5148,6 +5444,20 @@ const VIVO_CSS = `
 .vivo-order-sheet-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .vivo-order-sheet-msg { font-size: 11.5px; color: var(--olive-dark); }
 .vivo-order-sheet-total td { font-weight: 700; background: var(--paper); }
+.vivo-cu-tag { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border: 1px solid; border-radius: 100px; font-size: 11px; color: var(--ink); white-space: nowrap; }
+.vivo-cu-tag i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.vivo-cu-link { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--olive-dark); white-space: nowrap; }
+.vivo-cu-pendentes { margin-top: 16px; }
+.vivo-cu-pendentes summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--amber); }
+.vivo-kpi-sub { font-size: 10.5px; color: var(--ink-soft); margin-top: 2px; }
+.vivo-indicator-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.vivo-indicator-box { padding: 14px 16px; }
+.vivo-breakdown { display: flex; flex-direction: column; gap: 7px; }
+.vivo-breakdown-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr auto; gap: 10px; align-items: center; font-size: 12px; }
+.vivo-breakdown-label { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vivo-breakdown-track { height: 8px; background: var(--paper); border-radius: 4px; overflow: hidden; }
+.vivo-breakdown-track i { display: block; height: 100%; border-radius: 4px; }
+.vivo-breakdown-value { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--ink); text-align: right; min-width: 70px; }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
