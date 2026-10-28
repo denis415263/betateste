@@ -4091,14 +4091,15 @@ function MiniCurrencyChart({ series, color, title, metaSeries, metaLabel }) {
 // Capital excedente da marca: R$ (eixo esquerdo) e % do estoque total (eixo direito),
 // com a meta de 10% no eixo da direita. Os rótulos de cada eixo usam a cor da sua linha.
 const EXCESS_PCT_COLOR = "#2a78d6";
-function ExcessDualChart({ excessSeries, totalSeries, title }) {
+// showMetaGap: mostra quanto o capital excedente está acima/abaixo da meta de 10% em R$.
+function ExcessDualChart({ excessSeries, totalSeries, title, showMetaGap = false }) {
   const [hover, setHover] = useState(null);
   const svgRef = React.useRef(null);
   const series = useMemo(() => {
     const totalByDay = Object.fromEntries((totalSeries || []).map((t) => [t.dk, t.capital]));
     return (excessSeries || []).map((e) => {
       const total = totalByDay[e.dk];
-      return { ...e, pct: total > 0 ? e.capital / total : null };
+      return { ...e, total: total > 0 ? total : null, pct: total > 0 ? e.capital / total : null };
     });
   }, [excessSeries, totalSeries]);
 
@@ -4140,10 +4141,20 @@ function ExcessDualChart({ excessSeries, totalSeries, title }) {
     <div>
       <div className="vivo-minichart-header">
         <span className="vivo-capital-chart-label">{title}</span>
-        <span className="vivo-minichart-current" style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
-          <span style={{ color: "var(--rust)" }}><strong>{fmtCurrency(h.capital)}</strong></span>
-          <span style={{ color: EXCESS_PCT_COLOR }}><strong>{h.pct !== null ? fmtP(h.pct) : "—"}</strong> <span style={{ fontSize: 11 }}>do estoque</span></span>
-        </span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+          <span className="vivo-minichart-current" style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+            <span style={{ color: "var(--rust)" }}><strong>{fmtCurrency(h.capital)}</strong></span>
+            <span style={{ color: EXCESS_PCT_COLOR }}><strong>{h.pct !== null ? fmtP(h.pct) : "—"}</strong> <span style={{ fontSize: 11 }}>do estoque</span></span>
+          </span>
+          {showMetaGap && h.total !== null && (() => {
+            const gap = h.capital - h.total * 0.1;
+            return (
+              <span style={{ fontSize: 11, color: gap > 0 ? "var(--rust)" : "var(--olive-dark)", fontFamily: "monospace" }}>
+                {gap > 0 ? `▲ ${fmtCurrency(gap)} acima da meta de 10%` : `▼ ${fmtCurrency(-gap)} abaixo da meta de 10%`}
+              </span>
+            );
+          })()}
+        </div>
       </div>
       <div className="vivo-dual-legend">
         <span><i style={{ background: "var(--rust)" }} />Capital excedente R$ (eixo esq.)</span>
@@ -4352,11 +4363,6 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
   const criticos      = skus.filter((p) => p.status === "critico").length;
   const emExcesso     = skus.filter((p) => p.status === "excesso").length;
 
-  // Série de meta: 10% do estoque total em cada data
-  const metaSeries = useMemo(() => {
-    return totalStockSeries.map((s) => ({ ts: s.ts, capital: s.capital * 0.10 }));
-  }, [totalStockSeries]);
-
   return (
     <div className="vivo-page">
       <header className="vivo-page-head">
@@ -4409,13 +4415,12 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
         />
       </div>
 
-      {/* Gráfico de capital excedente global com linha de meta 10% */}
+      {/* Capital excedente: R$ (eixo esq.) e % do estoque total (eixo dir.), com a meta de 10% */}
       <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 20 }}>
-        <MiniCurrencyChart
-          series={excessSeries}
-          color="var(--rust)"
-          metaSeries={metaSeries}
-          metaLabel="Meta 10%"
+        <ExcessDualChart
+          excessSeries={excessSeries}
+          totalSeries={totalStockSeries}
+          showMetaGap
           title={excessSeries.length >= 2
             ? `Capital excedente total (>90d, custo líq.) — ${fmtDateShort(excessSeries[0].ts)} a ${fmtDateShort(excessSeries[excessSeries.length-1].ts)}`
             : "Capital excedente total (>90d de cobertura)"}
