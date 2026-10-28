@@ -3023,8 +3023,9 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoP
           {retorno !== undefined && (
             <div className={capitalExcPct === undefined ? "vivo-mc-order-kpi-sep" : undefined}
               title="MC R$ do mês ÷ estoque médio do mês (custo líquido) — última apuração, igual ao gráfico de MC abaixo">
-              <span>Retorno s/ estoque{retorno ? ` (${retorno.label}${retorno.provisional ? ", em andamento" : ""})` : ""}</span>
+              <span>Retorno s/ estoque</span>
               <strong className={retorno && retorno.value < 0 ? "vivo-below-min" : ""}>{retorno ? fmtPct(retorno.value) : "—"}</strong>
+              {retorno && <em>{retorno.label}{retorno.provisional ? " · em andamento" : ""}</em>}
             </div>
           )}
         </div>
@@ -5344,13 +5345,14 @@ const VIVO_CSS = `
 .vivo-supplier-name-link { cursor: pointer; color: var(--olive-dark) !important; text-decoration: underline; text-underline-offset: 3px; }
 .vivo-supplier-name-link:hover { color: var(--amber) !important; }
 .vivo-td-supplier { width: 110px; min-width: 110px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vivo-supplier-kpis { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
-.vivo-kpi-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
+.vivo-supplier-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.vivo-kpi-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 0; container-type: inline-size; }
 .vivo-kpi-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-soft); font-weight: 600; }
-.vivo-kpi-value { font-size: 18px; font-weight: 700; color: var(--ink); font-family: 'JetBrains Mono', monospace; }
+/* O número acompanha a largura do card (cqi = % da largura): sempre numa linha só */
+.vivo-kpi-value { font-size: clamp(13px, 11cqi, 18px); white-space: nowrap; font-weight: 700; color: var(--ink); font-family: 'JetBrains Mono', monospace; }
 .vivo-kpi-danger { color: var(--rust) !important; }
 .vivo-kpi-warn { color: var(--amber) !important; }
-.vivo-price-status-cards { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+.vivo-price-status-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .vivo-price-upload-card { padding: 20px 24px; margin-bottom: 16px; }
 .vivo-price-result { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
 .vivo-price-result-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -5472,12 +5474,13 @@ const VIVO_CSS = `
 .vivo-mc-order-box { padding: 12px 16px; margin-bottom: 14px; }
 .vivo-mc-order-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; color: var(--ink); margin-bottom: 8px; }
 .vivo-mc-order-title span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--ink-soft); }
-.vivo-mc-order-kpis { display: flex; gap: 32px; flex-wrap: wrap; }
-.vivo-mc-order-kpis div { display: flex; flex-direction: column; gap: 2px; }
+.vivo-mc-order-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px 24px; align-items: start; }
+.vivo-mc-order-kpis div { display: flex; flex-direction: column; gap: 2px; min-width: 0; container-type: inline-size; }
+.vivo-mc-order-kpis em { font-style: normal; font-size: 10.5px; color: var(--ink-soft); }
 .vivo-mc-order-kpis span { font-size: 11px; color: var(--ink-soft); }
-.vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; color: var(--ink); }
+.vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: clamp(13px, 11cqi, 17px); white-space: nowrap; font-weight: 500; color: var(--ink); }
 .vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
-.vivo-mc-order-kpi-sep { padding-left: 32px; border-left: 1px solid var(--line); }
+.vivo-mc-order-kpi-sep { padding-left: 24px; border-left: 1px solid var(--line); }
 .vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
 .vivo-mc-line-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 2px; }
 .vivo-carteira-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 320px; overflow-y: auto; }
