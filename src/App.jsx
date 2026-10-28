@@ -2162,7 +2162,7 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
         <button className="vivo-btn vivo-btn-primary" onClick={() => setShowOrderSheet(true)} disabled={orderItems.length === 0} style={{ marginLeft: "auto" }}
           title={orderItems.length === 0 ? "Nenhum item precisa de reposição" : undefined}>Gerar Pedido</button>
       </div>
-      <McBrandMonthCard fornecedor={fornecedor} settings={settings} />
+      <McBrandMonthCard fornecedor={fornecedor} settings={settings} capitalExcPct={brandExcessPct(products, fornecedor)} />
       <div className="vivo-table-wrap vivo-card">
         <table className="vivo-table vivo-table-compact">
           <thead>
@@ -2960,9 +2960,23 @@ function CarteiraRetornoChart({ series, carteira }) {
   );
 }
 
+// Capital excedente % atual da marca = capital em excesso ÷ estoque R$ (custo líquido),
+// considerando os SKUs não inativados — mesma conta dos cards da tela da marca.
+function brandExcessPct(products, fornecedor) {
+  let estoque = 0, excesso = 0;
+  for (const p of Object.values(products)) {
+    if (p.inactive || p.fornecedor !== fornecedor) continue;
+    estoque += (p.estoque || 0) * custoLiq(p);
+    const q = getStockQuality(p);
+    if (q.isExcess) excesso += q.capitalImobilizado;
+  }
+  return estoque > 0 ? (excesso / estoque) * 100 : null;
+}
+
 // Card "Marca em <mês>": faturamento, MC R$ e MC % da marca no mês de referência
 // (mesma regra de mês do Pedido Gerado — ver mcPickRefMonth).
-function McBrandMonthCard({ fornecedor, settings, style }) {
+// capitalExcPct (opcional): capital excedente % atual da marca, mostrado ao lado do MC %.
+function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct }) {
   const mc = useMcData();
   const mcRef = mcPickRefMonth(mc.data);
   const mcMonth = mcRef.month;
@@ -2977,11 +2991,21 @@ function McBrandMonthCard({ fornecedor, settings, style }) {
       {mc.error && <div className="vivo-mc-note vivo-mc-error" style={{ marginTop: 0 }}>Não foi possível carregar a MC: {mc.error}</div>}
       {mc.data && !mcMonth && <div className="vivo-mc-note" style={{ marginTop: 0 }}>A planilha de MC de {mcRef.label} ainda não tem dados.</div>}
       {mc.data && mcMonth && !mcBrand && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Marca sem vendas em {mcRef.label} na planilha de MC (ou com nome diferente — vincule na seção de MC da tela do fornecedor).</div>}
-      {mcBrand && (
+      {(mcBrand || capitalExcPct !== undefined) && (
         <div className="vivo-mc-order-kpis">
-          <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
-          <div><span>MC R$</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtCurrency(mcBrand.mc)}</strong></div>
-          <div><span>MC %</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtPct(mcBrand.fat ? mcBrand.mc / mcBrand.fat : null)}</strong></div>
+          {mcBrand && (<>
+            <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
+            <div><span>MC R$</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtCurrency(mcBrand.mc)}</strong></div>
+            <div><span>MC %</span><strong className={mcBrand.mc < 0 ? "vivo-below-min" : ""}>{fmtPct(mcBrand.fat ? mcBrand.mc / mcBrand.fat : null)}</strong></div>
+          </>)}
+          {capitalExcPct !== undefined && (
+            <div className="vivo-mc-order-kpi-sep" title="Capital em excesso ÷ estoque R$ da marca, com os valores de hoje (não do mês da MC)">
+              <span>Capital Excedente % (hoje)</span>
+              <strong style={{ color: capitalExcPct === null ? undefined : capitalExcPct > 10 ? "var(--rust)" : capitalExcPct > 5 ? "var(--amber)" : "var(--olive-dark)" }}>
+                {capitalExcPct === null ? "—" : `${capitalExcPct.toFixed(1)}%`}
+              </strong>
+            </div>
+          )}
         </div>
       )}
       {mc.data && mcRef.nota && (
@@ -5427,6 +5451,7 @@ const VIVO_CSS = `
 .vivo-mc-order-kpis span { font-size: 11px; color: var(--ink-soft); }
 .vivo-mc-order-kpis strong { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 500; color: var(--ink); }
 .vivo-mc-order-kpis strong.vivo-below-min { color: var(--rust); }
+.vivo-mc-order-kpi-sep { padding-left: 32px; border-left: 1px solid var(--line); }
 .vivo-mc-order-warn { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 6px 10px; }
 .vivo-mc-line-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 2px; }
 .vivo-carteira-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 320px; overflow-y: auto; }
