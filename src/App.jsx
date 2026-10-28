@@ -2976,8 +2976,22 @@ function brandExcessPct(products, fornecedor) {
 // Card "Marca em <mês>": faturamento, MC R$ e MC % da marca no mês de referência
 // (mesma regra de mês do Pedido Gerado — ver mcPickRefMonth).
 // capitalExcPct (opcional): capital excedente % atual da marca, mostrado ao lado do MC %.
-function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct }) {
+// retornoProducts (opcional): produtos para calcular o retorno sobre estoque da última
+// apuração — mesma regra do rótulo do último mês no gráfico de MC (último mês com MC e
+// estoque médio), que pode ser diferente do mês de referência do card.
+function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoProducts }) {
   const mc = useMcData();
+  const brandKey = (settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor);
+  const retorno = useMemo(() => {
+    if (!retornoProducts || !mc.data) return undefined;
+    const stock = buildMonthlyAvgStock(Object.values(retornoProducts).filter((p) => p.fornecedor === fornecedor));
+    const series = buildMcSeries(mc.data, (m) => m.brands[brandKey]);
+    for (let i = series.length - 1; i >= 0; i--) {
+      const sm = series[i], st = stock[sm.key];
+      if (sm.has && st && st.avg > 0) return { value: sm.mc / st.avg, label: sm.fullLabel, provisional: sm.provisional };
+    }
+    return null;
+  }, [retornoProducts, mc.data, fornecedor, brandKey]);
   const mcRef = mcPickRefMonth(mc.data);
   const mcMonth = mcRef.month;
   const mcCanaisAndamento = mcMonth && mcMonth.provisional
@@ -2991,7 +3005,7 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct }) {
       {mc.error && <div className="vivo-mc-note vivo-mc-error" style={{ marginTop: 0 }}>Não foi possível carregar a MC: {mc.error}</div>}
       {mc.data && !mcMonth && <div className="vivo-mc-note" style={{ marginTop: 0 }}>A planilha de MC de {mcRef.label} ainda não tem dados.</div>}
       {mc.data && mcMonth && !mcBrand && <div className="vivo-mc-note" style={{ marginTop: 0 }}>Marca sem vendas em {mcRef.label} na planilha de MC (ou com nome diferente — vincule na seção de MC da tela do fornecedor).</div>}
-      {(mcBrand || capitalExcPct !== undefined) && (
+      {(mcBrand || capitalExcPct !== undefined || retorno !== undefined) && (
         <div className="vivo-mc-order-kpis">
           {mcBrand && (<>
             <div><span>Faturamento</span><strong>{fmtCurrency(mcBrand.fat)}</strong></div>
@@ -3004,6 +3018,13 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct }) {
               <strong style={{ color: capitalExcPct === null ? undefined : capitalExcPct > 10 ? "var(--rust)" : capitalExcPct > 5 ? "var(--amber)" : "var(--olive-dark)" }}>
                 {capitalExcPct === null ? "—" : `${capitalExcPct.toFixed(1)}%`}
               </strong>
+            </div>
+          )}
+          {retorno !== undefined && (
+            <div className={capitalExcPct === undefined ? "vivo-mc-order-kpi-sep" : undefined}
+              title="MC R$ do mês ÷ estoque médio do mês (custo líquido) — última apuração, igual ao gráfico de MC abaixo">
+              <span>Retorno s/ estoque{retorno ? ` (${retorno.label}${retorno.provisional ? ", em andamento" : ""})` : ""}</span>
+              <strong className={retorno && retorno.value < 0 ? "vivo-below-min" : ""}>{retorno ? fmtPct(retorno.value) : "—"}</strong>
             </div>
           )}
         </div>
@@ -3812,7 +3833,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
         {minOrder && <div className="vivo-kpi-card"><span className="vivo-kpi-label">Pedido Mínimo</span><span className="vivo-kpi-value">{fmtCurrency(minOrder)}</span></div>}
       </div>
 
-      {tag !== "inativo" && <McBrandMonthCard fornecedor={fornecedor} settings={settings} style={{ marginTop: 14 }} />}
+      {tag !== "inativo" && <McBrandMonthCard fornecedor={fornecedor} settings={settings} style={{ marginTop: 14 }} capitalExcPct={brandExcessPct(products, fornecedor)} retornoProducts={products} />}
 
       <div className="vivo-supplier-charts">
         <div className="vivo-supplier-chart-block vivo-card">
