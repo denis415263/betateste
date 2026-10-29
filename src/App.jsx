@@ -3210,6 +3210,30 @@ function McRiscoKpi({ skus, loading }) {
   );
 }
 
+// Soma da MC em risco dos SKUs de uma marca (itens com etiqueta Inativo ficam de fora)
+function sumMcRisco(prods, mcUnitOf) {
+  if (!mcUnitOf) return null;
+  let total = 0, count = 0, estimado = false;
+  for (const p of prods) {
+    if (p.itemTag === "inativo") continue;
+    const r = calcMcRisco(p, mcUnitOf);
+    if (!r || !(r.risco > 0)) continue;
+    total += r.risco; count++;
+    if (r.unit && r.unit.estimado) estimado = true;
+  }
+  return { total, count, estimado };
+}
+function McRiscoSumCell({ info, loading }) {
+  if (!info) return <td className="num mono" style={{ color: "#bbb" }}>{loading ? "…" : "—"}</td>;
+  if (!(info.total > 0)) return <td className="num mono" style={{ color: "#bbb" }}>—</td>;
+  return (
+    <td className="num mono vivo-below-min" title={`${info.count} SKU(s) em risco nos próximos ${RISCO_PRAZO_DIAS} dias${info.estimado ? " — inclui estimativa para SKUs fora da planilha de MC" : ""}`}>
+      {info.estimado ? "≈ " : ""}{fmtCurrency(info.total)}
+    </td>
+  );
+}
+const MC_RISCO_TH_TITLE = `Soma da MC que deixa de entrar se os SKUs da marca faltarem nos próximos ${RISCO_PRAZO_DIAS} dias (reposição) — estoque abaixo de ${RUPTURA_TECNICA_DIAS} dias de venda não conta`;
+
 function McRiscoCell({ r, loading }) {
   if (loading && !r) return <td className="num mono" style={{ color: "#bbb" }}>…</td>;
   if (!r || r.risco === null) return <td className="num mono" style={{ color: "#bbb" }} title={mcRiscoTitle(r)}>—</td>;
@@ -4690,6 +4714,8 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
   }
 
   const supplierTags = settings.supplierTags || {};
+  const mcData = useMcData();
+  const mcUnitOf = useMemo(() => buildMcUnitLookup(mcData.data, settings), [mcData.data, settings]);
 
   const rows = useMemo(() => {
     const seen = new Set();
@@ -4704,9 +4730,10 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
       const capitalExc = prods.reduce((acc, p) => acc + getStockQuality(p).capitalImobilizado, 0);
       const pct = estoqueR > 0 ? (capitalExc / estoqueR) * 100 : 0;
       const tag = supplierTags[f] || "";
-      return { fornecedor: f, estoqueR, capitalExc, pct, tag };
+      const mcRisco = sumMcRisco(prods, mcUnitOf);
+      return { fornecedor: f, estoqueR, capitalExc, pct, tag, mcRisco, mcRiscoValue: mcRisco ? mcRisco.total : -1 };
     });
-  }, [products, supplierTags]);
+  }, [products, supplierTags, mcUnitOf]);
 
   const filtered = useMemo(() => {
     let out = rows;
@@ -4760,6 +4787,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. R$ <SortBtn col="capitalExc" /></th>
               <th className="num">% Cap. Exc. <SortBtn col="pct" /></th>
+              <th className="num" title={MC_RISCO_TH_TITLE}>MC em risco <SortBtn col="mcRiscoValue" /></th>
               <th>Tag <SortBtn col="tag" /></th>
             </tr>
           </thead>
@@ -4772,6 +4800,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
                 <td className={"num mono" + (r.pct > 10 ? " vivo-below-min" : r.pct > 5 ? " vivo-kpi-warn" : r.pct > 0 ? " vivo-above-min" : "")}>
                   {r.pct.toFixed(1)}%
                 </td>
+                <McRiscoSumCell info={r.mcRisco} loading={mcData.loading} />
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
                     className="vivo-select-tag"
@@ -4792,6 +4821,11 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
               <td className={"num mono" + (totalPct > 10 ? " vivo-below-min" : totalPct > 5 ? " vivo-kpi-warn" : " vivo-above-min")}>
                 {totalPct.toFixed(1)}%
               </td>
+              {(() => {
+                const list = filtered.filter((r) => r.mcRisco);
+                const total = list.reduce((acc, r) => acc + r.mcRisco.total, 0);
+                return <McRiscoSumCell info={list.length ? { total, count: list.reduce((acc, r) => acc + r.mcRisco.count, 0), estimado: list.some((r) => r.mcRisco.estimado) } : null} loading={mcData.loading} />;
+              })()}
               <td></td>
             </tr>
           </tbody>
@@ -4865,8 +4899,12 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
     return Object.values(products).filter((p) => !p.inactive && p.fornecedor).map((p) => p.fornecedor).filter((f) => { if (seen.has(f)) return false; seen.add(f); return true; });
   }, [products]);
 
+  const mcData = useMcData();
+  const mcUnitOf = useMemo(() => buildMcUnitLookup(mcData.data, settings), [mcData.data, settings]);
+
   const rows = useMemo(() => suppliers.map((f) => {
     const prods = Object.values(products).filter((p) => !p.inactive && p.fornecedor === f);
+    const mcRisco = sumMcRisco(prods, mcUnitOf);
     const estoque = prods.reduce((acc, p) => acc + (p.estoque || 0) * custoLiq(p), 0);
     const customDays = customDaysMap[f] || null;
     return {
@@ -4875,8 +4913,9 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
       c30: calcSupplierPurchase(products, f, 30), c45: calcSupplierPurchase(products, f, 45),
       c60: calcSupplierPurchase(products, f, 60), c90: calcSupplierPurchase(products, f, 90),
       cCustom: customDays ? calcSupplierPurchase(products, f, customDays) : null,
+      mcRisco, mcRiscoValue: mcRisco ? mcRisco.total : -1,
     };
-  }), [suppliers, products, minOrders, supplierTags, customDaysMap]);
+  }), [suppliers, products, minOrders, supplierTags, customDaysMap, mcUnitOf]);
 
   const filtered = useMemo(() => {
     let out = rows;
@@ -4944,6 +4983,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
               <th className="vivo-th-custom"></th>
               <th className="num">Pedido Mínimo (R$)</th>
               <th onClick={() => toggleSort("estoque")} className="num vivo-th-sortable">Estoque R$ <SortIcon col="estoque" /></th>
+              <th onClick={() => toggleSort("mcRiscoValue")} className="num vivo-th-sortable" title={MC_RISCO_TH_TITLE}>MC em risco <SortIcon col="mcRiscoValue" /></th>
               <th onClick={() => toggleSort("c30")} className="num vivo-th-sortable">Compra 30D <SortIcon col="c30" /></th>
               <th onClick={() => toggleSort("c45")} className="num vivo-th-sortable">Compra 45D <SortIcon col="c45" /></th>
               <th onClick={() => toggleSort("c60")} className="num vivo-th-sortable">Compra 60D <SortIcon col="c60" /></th>
@@ -4975,13 +5015,14 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
                   <input type="number" min="0" className="vivo-input-mini vivo-input-min-order" placeholder="—" value={r.minOrder} onChange={(e) => setMinOrder(r.fornecedor, e.target.value)} />
                 </td>
                 <td className="num mono">{fmtCurrency(r.estoque)}</td>
+                <McRiscoSumCell info={r.mcRisco} loading={mcData.loading} />
                 <td className={"num mono" + (r.minOrder && r.c30 < r.minOrder ? " vivo-below-min" : r.minOrder && r.c30 >= r.minOrder ? " vivo-above-min" : "")}>{fmtCurrency(r.c30)}</td>
                 <td className={"num mono" + (r.minOrder && r.c45 < r.minOrder ? " vivo-below-min" : r.minOrder && r.c45 >= r.minOrder ? " vivo-above-min" : "")}>{fmtCurrency(r.c45)}</td>
                 <td className={"num mono" + (r.minOrder && r.c60 < r.minOrder ? " vivo-below-min" : r.minOrder && r.c60 >= r.minOrder ? " vivo-above-min" : "")}>{fmtCurrency(r.c60)}</td>
                 <td className={"num mono" + (r.minOrder && r.c90 < r.minOrder ? " vivo-below-min" : r.minOrder && r.c90 >= r.minOrder ? " vivo-above-min" : "")}>{fmtCurrency(r.c90)}</td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={11} className="vivo-table-empty">Nenhum fornecedor encontrado.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={12} className="vivo-table-empty">Nenhum fornecedor encontrado.</td></tr>}
           </tbody>
         </table>
       </div>
