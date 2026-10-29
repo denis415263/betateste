@@ -2976,9 +2976,8 @@ function brandExcessPct(products, fornecedor) {
 // Card "Marca em <mês>": faturamento, MC R$ e MC % da marca no mês de referência
 // (mesma regra de mês do Pedido Gerado — ver mcPickRefMonth).
 // capitalExcPct (opcional): capital excedente % atual da marca, mostrado ao lado do MC %.
-// retornoProducts (opcional): produtos para calcular o retorno sobre estoque da última
-// apuração — mesma regra do rótulo do último mês no gráfico de MC (último mês com MC e
-// estoque médio), que pode ser diferente do mês de referência do card.
+// retornoProducts (opcional): produtos para calcular o retorno sobre estoque do último mês
+// FECHADO com MC e estoque médio (até o mês de referência do card).
 function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoProducts }) {
   const mc = useMcData();
   const brandKey = (settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor);
@@ -2986,8 +2985,10 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoP
     if (!retornoProducts || !mc.data) return undefined;
     const stock = buildMonthlyAvgStock(Object.values(retornoProducts).filter((p) => p.fornecedor === fornecedor));
     const series = buildMcSeries(mc.data, (m) => m.brands[brandKey]);
+    const refKey = mcPickRefMonth(mc.data).key; // só meses fechados (o corrente ainda não tem MC)
     for (let i = series.length - 1; i >= 0; i--) {
       const sm = series[i], st = stock[sm.key];
+      if (sm.key > refKey) continue;
       if (sm.has && st && st.avg > 0) return { value: sm.mc / st.avg, label: sm.fullLabel, provisional: sm.provisional };
     }
     return null;
@@ -3149,11 +3150,14 @@ function demandaDiariaRisco(p, now = Date.now()) {
   }
   return { porDia: best / 30, vendas30: best, ts: bestTs };
 }
-// MC por unidade: planilha de MC (aba Dados Itens), mês mais recente em que o SKU vendeu.
+// MC por unidade: planilha de MC (aba Dados Itens), mês FECHADO mais recente em que o SKU
+// vendeu — o mês corrente já tem faturamento e unidades, mas a MC ainda não foi calculada.
+// "Fechado" = até o mês de referência do card de MC (mcPickRefMonth).
 // Sem venda na planilha: preço estimado = custo de nota × 2, com o MC % da marca (estimativa).
 function buildMcUnitLookup(data, settings) {
   if (!data || !data.months) return null;
-  const months = [...data.months].sort((a, b) => b.key.localeCompare(a.key));
+  const refKey = mcPickRefMonth(data).key;
+  const months = data.months.filter((m) => m.key <= refKey).sort((a, b) => b.key.localeCompare(a.key));
   const itemUnit = {}, brandPct = {};
   for (const m of months) {
     for (const [sku, r] of Object.entries(m.items || {})) {
