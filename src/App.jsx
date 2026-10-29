@@ -3133,6 +3133,86 @@ function buildMonthlyAvgStock(productList, now = Date.now()) {
   return out;
 }
 
+// ---------- MC em risco (ruptura nos próximos dias) ----------
+// Demanda/dia = maior "Vendas 30D" entre as importações dos últimos 30 dias ÷ 30 (evita
+// usar um número já derrubado pela ruptura). Estoque abaixo de 5 dias de venda não conta
+// (ruptura técnica: sobra que não vale enviar ao Full). Reposição leva sempre 10 dias.
+//   dias em falta = 10 − max(0, cobertura − 5), entre 0 e 10  → sem risco só com ≥ 15 dias
+//   MC em risco   = dias em falta × demanda/dia × MC por unidade
+const RISCO_PRAZO_DIAS = 10;
+const RUPTURA_TECNICA_DIAS = 5;
+function demandaDiariaRisco(p, now = Date.now()) {
+  let best = p.vendas30 || 0, bestTs = null;
+  for (const snap of p.salesHistory || []) {
+    if (snap.ts < now - 30 * MS_PER_DAY) continue;
+    if ((snap.vendas30 || 0) > best) { best = snap.vendas30; bestTs = snap.ts; }
+  }
+  return { porDia: best / 30, vendas30: best, ts: bestTs };
+}
+// MC por unidade: planilha de MC (aba Dados Itens), mês mais recente em que o SKU vendeu.
+// Sem venda na planilha: preço estimado = custo de nota × 2, com o MC % da marca (estimativa).
+function buildMcUnitLookup(data, settings) {
+  if (!data || !data.months) return null;
+  const months = [...data.months].sort((a, b) => b.key.localeCompare(a.key));
+  const itemUnit = {}, brandPct = {};
+  for (const m of months) {
+    for (const [sku, r] of Object.entries(m.items || {})) {
+      if (itemUnit[sku] === undefined && r.un > 0) itemUnit[sku] = { value: r.mc / r.un, mes: m.key };
+    }
+    for (const [k, b] of Object.entries(m.brands || {})) {
+      if (brandPct[k] === undefined && b.fat > 0) brandPct[k] = b.mc / b.fat;
+    }
+  }
+  return (p) => {
+    const u = itemUnit[String(p.codigo).toUpperCase()];
+    if (u) return { value: u.value, estimado: false, mes: u.mes };
+    const pct = brandPct[settings?.mcBrandMap?.[p.fornecedor] || mcNorm(p.fornecedor)];
+    const preco = custoNota(p) * 2;
+    if (pct !== undefined && preco > 0) return { value: preco * pct, estimado: true, mes: null };
+    return null;
+  };
+}
+function calcMcRisco(p, mcUnitOf, now = Date.now()) {
+  const dem = demandaDiariaRisco(p, now);
+  if (!(dem.porDia > 0)) return null;
+  const cobertura = (p.estoque || 0) / dem.porDia;
+  const diasFalta = Math.min(RISCO_PRAZO_DIAS, Math.max(0, RISCO_PRAZO_DIAS - Math.max(0, cobertura - RUPTURA_TECNICA_DIAS)));
+  const unit = mcUnitOf ? mcUnitOf(p) : null;
+  const risco = unit ? diasFalta * dem.porDia * Math.max(0, unit.value) : null;
+  return { cobertura, diasFalta, demanda: dem, unit, risco };
+}
+function mcRiscoTitle(r) {
+  if (!r) return "Sem venda nos últimos 30 dias";
+  const linhas = [
+    `Cobertura: ${r.cobertura.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} dias (ruptura técnica abaixo de ${RUPTURA_TECNICA_DIAS})`,
+    `Dias em falta nos próximos ${RISCO_PRAZO_DIAS}: ${r.diasFalta.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}`,
+    `Demanda: ${(r.demanda.porDia).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} un/dia (maior Vendas 30D em 30 dias: ${r.demanda.vendas30}${r.demanda.ts ? `, de ${fmtDateShort(r.demanda.ts)}` : ", hoje"})`,
+  ];
+  if (r.unit) linhas.push(`MC por unidade: ${fmtCurrency(r.unit.value)}${r.unit.estimado ? " (estimativa: custo de nota × 2 com o MC % da marca)" : ` (planilha de MC, ${mcMonthLabel(r.unit.mes, true)})`}`);
+  else linhas.push("Sem MC por unidade (SKU fora da planilha de MC e sem custo/MC da marca)");
+  return linhas.join("\n");
+}
+// Card "MC em risco": soma dos SKUs visíveis (itens com etiqueta Inativo ficam de fora)
+function McRiscoKpi({ skus, loading }) {
+  const list = skus.filter((p) => p.itemTag !== "inativo" && p.mcRisco && p.mcRisco.risco > 0);
+  const total = list.reduce((acc, p) => acc + p.mcRisco.risco, 0);
+  const estimado = list.some((p) => p.mcRisco.unit && p.mcRisco.unit.estimado);
+  return (
+    <div className="vivo-kpi-card" title={`Soma da MC que deixa de entrar se os itens faltarem nos próximos ${RISCO_PRAZO_DIAS} dias (${list.length} SKUs)${estimado ? " — inclui estimativas para SKUs fora da planilha de MC" : ""}`}>
+      <span className="vivo-kpi-label">MC em risco ({RISCO_PRAZO_DIAS}d)</span>
+      <span className={"vivo-kpi-value" + (total > 0 ? " vivo-kpi-danger" : "")}>{loading && !total ? "…" : fmtCurrency(total)}</span>
+      <span className="vivo-kpi-sub">{list.length} SKUs{estimado ? " · com estimativa" : ""}</span>
+    </div>
+  );
+}
+
+function McRiscoCell({ r, loading }) {
+  if (loading && !r) return <td className="num mono" style={{ color: "#bbb" }}>…</td>;
+  if (!r || r.risco === null) return <td className="num mono" style={{ color: "#bbb" }} title={mcRiscoTitle(r)}>—</td>;
+  if (r.risco <= 0) return <td className="num mono" style={{ color: "#bbb" }} title={mcRiscoTitle(r)}>—</td>;
+  return <td className="num mono vivo-below-min" title={mcRiscoTitle(r)}>{r.unit.estimado ? "≈ " : ""}{fmtCurrency(r.risco)}</td>;
+}
+
 // Série mensal (últimos 12 meses disponíveis) a partir de um "pick" por mês
 function buildMcSeries(data, pick) {
   if (!data || !data.months || !data.months.length) return [];
@@ -3735,6 +3815,8 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
   const minOrder = settings.supplierMinOrders?.[fornecedor] || null;
   const excessCodes = useMemo(() => new Set(Object.values(products).filter((p) => !p.inactive && getStockQuality(p).isExcess).map((p) => p.codigo)), [products]);
 
+  const mcData = useMcData();
+  const mcUnitOf = useMemo(() => buildMcUnitLookup(mcData.data, settings), [mcData.data, settings]);
   const skus = useMemo(() =>
     Object.values(products)
       .filter((p) => !p.inactive && p.fornecedor === fornecedor)
@@ -3744,10 +3826,12 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
         const coverageDays = avgDay > 0 ? Math.floor((p.estoque || 0) / avgDay) : null;
         const status = q.isExcess ? "excesso" : avgDay > 0 && coverageDays !== null && coverageDays < 15 ? "critico" : "ok";
         const vs = getValidadeStatus(p);
-        return { ...p, quality: q, avgDay, coverageDays, status, estoqueR: (p.estoque || 0) * custoLiq(p), capitalExc: q.isExcess ? q.capitalImobilizado : 0, venceEm: vs.status === "semDados" ? null : vs.diasRestantes };
+        const mcRisco = calcMcRisco(p, mcUnitOf);
+        return { ...p, quality: q, avgDay, coverageDays, status, estoqueR: (p.estoque || 0) * custoLiq(p), capitalExc: q.isExcess ? q.capitalImobilizado : 0, venceEm: vs.status === "semDados" ? null : vs.diasRestantes,
+          mcRisco, mcRiscoValue: mcRisco && mcRisco.risco !== null ? mcRisco.risco : -1 };
       })
       .sort((a, b) => (b.vendas30 || 0) - (a.vendas30 || 0)),
-    [products, fornecedor]);
+    [products, fornecedor, mcUnitOf]);
 
   const skusSorted = useMemo(() => {
     let list = skus;
@@ -3829,6 +3913,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
           );
         })()}
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">SKUs Críticos (&lt;15d)</span><span className={"vivo-kpi-value" + (criticos > 0 ? " vivo-kpi-danger" : "")}>{criticos}</span></div>
+        <McRiscoKpi skus={skus} loading={mcData.loading} />
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">SKUs em Excesso</span><span className={"vivo-kpi-value" + (excesso > 0 ? " vivo-kpi-warn" : "")}>{excesso}</span></div>
         <div className="vivo-kpi-card"><span className="vivo-kpi-label">Total de SKUs</span><span className="vivo-kpi-value">{skus.length}</span></div>
         {minOrder && <div className="vivo-kpi-card"><span className="vivo-kpi-label">Pedido Mínimo</span><span className="vivo-kpi-value">{fmtCurrency(minOrder)}</span></div>}
@@ -3902,6 +3987,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
                 <th className="num" title="Custo líquido (ATON) — usado em relatórios">Custo Líq. <SortBtn col="custoLiquido" /></th>
                 <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
                 <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
+                <th className="num" title={`MC que deixa de entrar se o item faltar nos próximos ${RISCO_PRAZO_DIAS} dias (reposição) — estoque abaixo de ${RUPTURA_TECNICA_DIAS} dias de venda não conta`}>MC em risco <SortBtn col="mcRiscoValue" /></th>
                 <th>Situação</th>
               </tr>
             </thead>
@@ -3936,6 +4022,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
                   <td className="num mono" title={p.precoCusto ? `Custo de nota: ${fmtCurrency(p.precoCusto)}` : "Custo de nota não cadastrado"}>{custoLiq(p) ? fmtCurrency(custoLiq(p)) : "—"}</td>
                   <td className="num mono">{fmtCurrency((p.estoque || 0) * custoLiq(p))}</td>
                   <td className={"num mono" + (p.quality.isExcess ? " vivo-below-min" : "")}>{p.quality.isExcess ? fmtCurrency(p.quality.capitalImobilizado) : "—"}</td>
+                  <McRiscoCell r={p.mcRisco} loading={mcData.loading} />
                   <td>
                     {p.status === "critico" && <span className="vivo-badge vivo-badge-danger">Crítico</span>}
                     {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
@@ -3943,7 +4030,7 @@ function SupplierDetail({ fornecedor, products, settings, persistProducts, persi
                   </td>
                 </tr>
               ))}
-              {skusSorted.length === 0 && <tr><td colSpan={showValidade ? 13 : 10} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
+              {skusSorted.length === 0 && <tr><td colSpan={showValidade ? 14 : 11} className="vivo-table-empty">Nenhum item com essa situação.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -4325,6 +4412,9 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
     );
   }
 
+  const mcData = useMcData();
+  const mcUnitOf = useMemo(() => buildMcUnitLookup(mcData.data, settings), [mcData.data, settings]);
+
   // Todos os produtos ativos com métricas calculadas
   const skus = useMemo(() => {
     return Object.values(products)
@@ -4338,14 +4428,16 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
           : avgDay > 0 && coverageDays !== null && coverageDays < 15
             ? "critico" : "ok";
         const validadeStatus = getValidadeStatus(p);
+        const mcRisco = calcMcRisco(p, mcUnitOf);
         return {
           ...p, quality: q, avgDay, coverageDays, status, validadeStatus,
           venceEm:    validadeStatus.status === "semDados" ? null : validadeStatus.diasRestantes,
           estoqueR:   (p.estoque || 0) * custoLiq(p),
           capitalExc: q.capitalImobilizado,
+          mcRisco, mcRiscoValue: mcRisco && mcRisco.risco !== null ? mcRisco.risco : -1,
         };
       });
-  }, [products]);
+  }, [products, mcUnitOf]);
 
   const skusSorted = useMemo(() => {
     return [...skus]
@@ -4416,6 +4508,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
           <span className="vivo-kpi-label">SKUs Críticos</span>
           <span className={"vivo-kpi-value" + (criticos > 0 ? " vivo-kpi-danger" : "")}>{criticos}</span>
         </div>
+        <McRiscoKpi skus={skus} loading={mcData.loading} />
         <div className="vivo-kpi-card">
           <span className="vivo-kpi-label">SKUs em Excesso</span>
           <span className={"vivo-kpi-value" + (emExcesso > 0 ? " vivo-kpi-warn" : "")}>{emExcesso}</span>
@@ -4488,6 +4581,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
               <th className="num">Custo Líq. <SortBtn col="custoLiquido" /></th>
               <th className="num">Estoque R$ <SortBtn col="estoqueR" /></th>
               <th className="num">Capital Exc. <SortBtn col="capitalExc" /></th>
+              <th className="num" title={`MC que deixa de entrar se o item faltar nos próximos ${RISCO_PRAZO_DIAS} dias (reposição) — estoque abaixo de ${RUPTURA_TECNICA_DIAS} dias de venda não conta`}>MC em risco <SortBtn col="mcRiscoValue" /></th>
               <th>Situação</th>
               <th className="num">Últ. Entrada <SortBtn col="ultimaEntrada" /></th>
               <th className="num" title="Dias até o vencimento (última entrada + validade)">Vence em <SortBtn col="venceEm" /></th>
@@ -4519,6 +4613,7 @@ function OverviewTab({ products: allProducts, persistProducts, settings, carteir
                 <td className={"num mono" + (p.quality.isExcess ? " vivo-below-min" : "")}>
                   {p.quality.isExcess ? fmtCurrency(p.capitalExc) : "—"}
                 </td>
+                <McRiscoCell r={p.mcRisco} loading={mcData.loading} />
                 <td>
                   {p.status === "critico" && <span className="vivo-badge vivo-badge-danger">Crítico</span>}
                   {p.status === "excesso" && <span className="vivo-badge vivo-badge-warn">Excesso</span>}
