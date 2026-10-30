@@ -2837,7 +2837,10 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
     const fora = ((data.carteiras && data.carteiras[carteira]) || [])
       .filter((name) => !noVivora.has(mcNorm(name)))
       .map((name) => ({ name, motivo: inativas.has(mcNorm(name)) ? "marca inativa no Vívora" : "sem SKU ativo no Vívora com esse nome (ou nome diferente do ERP)" }));
-    return { entram, fora };
+    const nomesPlanilha = new Set();
+    for (const m of data.months || []) for (const k of Object.keys(m.brands || {})) nomesPlanilha.add(k);
+    for (const k of ["A", "B", "AB"]) for (const name of (data.carteiras && data.carteiras[k]) || []) nomesPlanilha.add(mcNorm(name));
+    return { entram, fora, nomesPlanilha };
   }, [data, lookup, products, filter, settings, carteira]);
 
   // De-para fornecedor do Vívora → marca da planilha de MC (settings.mcBrandMap, o mesmo
@@ -2894,7 +2897,10 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
     try { await links.onLink(fornecedores, key); } finally { setSavingLink(false); }
   }
   const monthsWithData = series.filter((s) => s.has);
-  const defaultMonth = ([...monthsWithData].reverse().find((s) => !s.provisional) || monthsWithData[monthsWithData.length - 1] || {}).key;
+  // Mês padrão = mês de referência pela regra de data (até o dia 10, retrasado; depois, anterior),
+  // o mesmo do card "Marca em <mês>" — o status "em andamento" da planilha não é confiável.
+  const refKey = mcPickRefMonth({ months: mcMonths }).key;
+  const defaultMonth = (monthsWithData.find((s) => s.key === refKey) || [...monthsWithData].reverse().find((s) => s.key <= refKey) || monthsWithData[monthsWithData.length - 1] || {}).key;
   const [compMonth, setCompMonth] = useState(defaultMonth);
   const [wrapRef, width] = useElementWidth();
   const [hover, setHover] = useState(null);
@@ -2930,7 +2936,7 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
   }
   const h = hover !== null ? series[hover] : null;
   const tipLeft = hover !== null && cx(hover) < W * 0.6;
-  const last = [...series].reverse().find((s) => s.ret !== null && !s.provisional) || null;
+  const last = [...series].reverse().find((s) => s.ret !== null && s.key <= refKey) || null;
 
   return (
     <div className="vivo-supplier-chart-block vivo-card" style={{ marginBottom: 20 }}>
@@ -3007,11 +3013,13 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
           return { ...e, nome: b ? b.name : e.fornecedores.join(", "), fat: b ? b.fat : null, mc: b ? b.mc : null };
         });
         const comMc = rows.filter((r) => r.mc !== null).sort((a, b) => b.mc - a.mc);
-        const semMc = rows.filter((r) => r.mc === null).sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+        const conhecido = (r) => composicao.nomesPlanilha && composicao.nomesPlanilha.has(r.key);
+        const semVenda = rows.filter((r) => r.mc === null && conhecido(r)).sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+        const semMc = rows.filter((r) => r.mc === null && !conhecido(r)).sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
         const totFat = comMc.reduce((acc, r) => acc + r.fat, 0), totMc = comMc.reduce((acc, r) => acc + r.mc, 0);
         return (
           <details className="vivo-comp-details">
-            <summary>Marcas que compõem a MC da carteira {carteira} ({comMc.length} com MC{semMc.length ? ` · ${semMc.length} sem MC` : ""}{composicao.fora.length ? ` · ${composicao.fora.length} fora da conta` : ""})</summary>
+            <summary>Marcas que compõem a MC da carteira {carteira} ({comMc.length} com MC{semVenda.length ? ` · ${semVenda.length} sem venda no mês` : ""}{semMc.length ? ` · ${semMc.length} sem MC na planilha` : ""}{composicao.fora.length ? ` · ${composicao.fora.length} fora da conta` : ""})</summary>
             <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 8px", fontSize: 12 }}>
               Mês:
               <select className="vivo-select-tag" style={{ minWidth: 0 }} value={compMonth || ""} onChange={(e) => setCompMonth(e.target.value)}>
@@ -3044,8 +3052,15 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
                     <td className="num mono">{fmtCurrency(totMc)}</td>
                     <td className="num mono">{fmtPct(totFat ? totMc / totFat : null)}</td>
                   </tr>
+                  {semVenda.map((r) => (
+                    <tr key={r.key} title="A marca existe na planilha, mas não teve venda neste mês (MC R$ 0,00)">
+                      <td style={{ color: "var(--ink-soft)" }}>sem venda no mês</td>
+                      <td style={{ color: "var(--ink-soft)" }}>{r.fornecedores.join(", ")}</td>
+                      <td className="num mono" style={{ color: "#bbb" }}>R$ 0,00</td><td className="num mono" style={{ color: "#bbb" }}>R$ 0,00</td><td className="num mono" style={{ color: "#bbb" }}>—</td>
+                    </tr>
+                  ))}
                   {semMc.map((r) => (
-                    <tr key={r.key} title="Não há MC com esse nome na aba Dados da planilha neste mês: sem venda, ou nome diferente — vincule a marca na seção de MC da tela do fornecedor">
+                    <tr key={r.key} title="Esse nome não aparece em nenhum mês da planilha de MC nem na aba Carteira — provavelmente o nome é diferente: escolha a marca correspondente">
                       <td style={{ color: "var(--amber)" }}>sem MC na planilha</td>
                       <td>
                         {r.fornecedores.join(", ")}
