@@ -2840,6 +2840,21 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
     return { entram, fora };
   }, [data, lookup, products, filter, settings, carteira]);
 
+  // De-para fornecedor do Vívora → marca da planilha de MC (settings.mcBrandMap, o mesmo
+  // vínculo da seção de MC da tela do fornecedor). Vale para a MC e para a carteira.
+  async function setBrandLink(fornecedores, key) {
+    const next = { ...(settings.mcBrandMap || {}) };
+    for (const f of [].concat(fornecedores)) { if (key) next[f] = key; else delete next[f]; }
+    await persistSettings({ ...settings, mcBrandMap: next });
+  }
+  const linkOptions = useMemo(() => {
+    if (!data) return null;
+    const brands = {};
+    for (const m of data.months || []) for (const [k, b] of Object.entries(m.brands || {})) brands[k] = b.name;
+    const fornecedores = [...new Set(Object.values(products).filter((p) => !p.inactive && p.fornecedor).map((p) => p.fornecedor))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+    return { brands: Object.entries(brands).sort((a, b) => a[1].localeCompare(b[1], "pt-BR")), fornecedores };
+  }, [data, products]);
+
   async function setManual(fornecedor, value) {
     const next = { ...(settings.carteiraManual || {}) };
     if (value) next[fornecedor] = value; else delete next[fornecedor];
@@ -2863,14 +2878,21 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
   return (
     <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter}
       notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />}
-      extraCharts={retornoSeries.some((s) => s.has) ? <CarteiraRetornoChart series={retornoSeries} carteira={carteira} mcMonths={data.months} composicao={composicao} /> : null} />
+      extraCharts={retornoSeries.some((s) => s.has) ? <CarteiraRetornoChart series={retornoSeries} carteira={carteira} mcMonths={data.months} composicao={composicao}
+        links={{ map: settings.mcBrandMap || {}, onLink: setBrandLink, options: linkOptions }} /> : null} />
   );
 }
 
 // Carteira: MC R$ do mês (barras, eixo esquerdo) e retorno sobre estoque (linha, eixo
 // direito) = MC R$ ÷ estoque médio do mês. Os rótulos de cada eixo usam a cor da série.
 const RET_COLOR = "#2a78d6";
-function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = null }) {
+function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = null, links = null }) {
+  const [savingLink, setSavingLink] = useState(false);
+  async function link(fornecedores, key) {
+    if (!links) return;
+    setSavingLink(true);
+    try { await links.onLink(fornecedores, key); } finally { setSavingLink(false); }
+  }
   const monthsWithData = series.filter((s) => s.has);
   const defaultMonth = ([...monthsWithData].reverse().find((s) => !s.provisional) || monthsWithData[monthsWithData.length - 1] || {}).key;
   const [compMonth, setCompMonth] = useState(defaultMonth);
@@ -3003,7 +3025,14 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
                   {comMc.map((r) => (
                     <tr key={r.key}>
                       <td>{r.nome}</td>
-                      <td style={{ color: "var(--ink-soft)" }}>{r.fornecedores.join(", ")}</td>
+                      <td style={{ color: "var(--ink-soft)" }}>
+                        {r.fornecedores.join(", ")}
+                        {links && r.fornecedores.some((f) => links.map[f]) && (
+                          <span className="vivo-depara-tag" title="Vínculo feito no Vívora (de-para com a planilha de MC)">
+                            vinculado · <a href="#" onClick={(e) => { e.preventDefault(); link(r.fornecedores.filter((f) => links.map[f]), null); }}>desfazer</a>
+                          </span>
+                        )}
+                      </td>
                       <td className="num mono">{fmtCurrency(r.fat)}</td>
                       <td className={"num mono" + (r.mc < 0 ? " vivo-below-min" : "")}>{fmtCurrency(r.mc)}</td>
                       <td className={"num mono" + (r.mc < 0 ? " vivo-below-min" : "")}>{fmtPct(r.fat ? r.mc / r.fat : null)}</td>
@@ -3018,7 +3047,15 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
                   {semMc.map((r) => (
                     <tr key={r.key} title="Não há MC com esse nome na aba Dados da planilha neste mês: sem venda, ou nome diferente — vincule a marca na seção de MC da tela do fornecedor">
                       <td style={{ color: "var(--amber)" }}>sem MC na planilha</td>
-                      <td>{r.fornecedores.join(", ")}</td>
+                      <td>
+                        {r.fornecedores.join(", ")}
+                        {links && links.options && (
+                          <select className="vivo-select-tag vivo-depara-select" value="" disabled={savingLink} onChange={(e) => e.target.value && link(r.fornecedores, e.target.value)} onClick={(e) => e.stopPropagation()}>
+                            <option value="">É qual marca na planilha?</option>
+                            {links.options.brands.map(([k, name]) => <option key={k} value={k}>{name}</option>)}
+                          </select>
+                        )}
+                      </td>
                       <td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td>
                     </tr>
                   ))}
@@ -3029,7 +3066,17 @@ function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = nu
               <div className="vivo-mc-note" style={{ marginTop: 10 }}>
                 <strong style={{ color: "var(--amber)" }}>Na aba Carteira, mas fora da conta:</strong>
                 <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-                  {composicao.fora.map((x) => <li key={x.name}>{x.name} — {x.motivo}</li>)}
+                  {composicao.fora.map((x) => (
+                    <li key={x.name}>
+                      {x.name} — {x.motivo}
+                      {links && links.options && !x.motivo.startsWith("marca inativa") && (
+                        <select className="vivo-select-tag vivo-depara-select" value="" disabled={savingLink} onChange={(e) => e.target.value && link(e.target.value, mcNorm(x.name))}>
+                          <option value="">É qual fornecedor no Vívora?</option>
+                          {links.options.fornecedores.map((f) => <option key={f} value={f}>{f}</option>)}
+                        </select>
+                      )}
+                    </li>
+                  ))}
                 </ul>
               </div>
             )}
@@ -5732,6 +5779,9 @@ const VIVO_CSS = `
 .vivo-breakdown-track { height: 8px; background: var(--paper); border-radius: 4px; overflow: hidden; }
 .vivo-breakdown-track i { display: block; height: 100%; border-radius: 4px; }
 .vivo-breakdown-value { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--ink); text-align: right; min-width: 70px; }
+.vivo-depara-select { margin-left: 8px; min-width: 0; max-width: 240px; font-size: 11px; padding: 2px 4px; }
+.vivo-depara-tag { margin-left: 8px; font-size: 10.5px; color: var(--olive-dark); }
+.vivo-depara-tag a { color: var(--olive-dark); }
 .vivo-comp-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .vivo-comp-details summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink); }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
