@@ -2821,6 +2821,25 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
     });
   }, [data, lookup, products, filter, settings]);
 
+  // Composição da MC da carteira: marcas que entram na soma (chave da aba "Dados" da
+  // planilha de MC) e nomes da aba "Carteira" que ficaram de fora, com o motivo.
+  const composicao = useMemo(() => {
+    if (!data || !lookup) return null;
+    const prods = Object.values(products).filter(filter);
+    const byKey = {};
+    for (const p of prods) {
+      const k = settings?.mcBrandMap?.[p.fornecedor] || mcNorm(p.fornecedor);
+      (byKey[k] || (byKey[k] = new Set())).add(p.fornecedor);
+    }
+    const entram = Object.entries(byKey).map(([key, set]) => ({ key, fornecedores: [...set].sort() }));
+    const noVivora = new Set([...prods.map((p) => mcNorm(p.fornecedor)), ...entram.map((e) => e.key)]);
+    const inativas = new Set([...inactiveBrandSet(settings)].map(mcNorm));
+    const fora = ((data.carteiras && data.carteiras[carteira]) || [])
+      .filter((name) => !noVivora.has(mcNorm(name)))
+      .map((name) => ({ name, motivo: inativas.has(mcNorm(name)) ? "marca inativa no Vívora" : "sem SKU ativo no Vívora com esse nome (ou nome diferente do ERP)" }));
+    return { entram, fora };
+  }, [data, lookup, products, filter, settings, carteira]);
+
   async function setManual(fornecedor, value) {
     const next = { ...(settings.carteiraManual || {}) };
     if (value) next[fornecedor] = value; else delete next[fornecedor];
@@ -2844,14 +2863,17 @@ function CarteiraOverviewTab({ carteira, products, persistProducts, settings, pe
   return (
     <OverviewTab products={products} persistProducts={persistProducts} settings={settings} carteira={carteira} filter={filter}
       notice={<CarteiraNotice info={info} manual={settings.carteiraManual || {}} onSet={setManual} />}
-      extraCharts={retornoSeries.some((s) => s.has) ? <CarteiraRetornoChart series={retornoSeries} carteira={carteira} /> : null} />
+      extraCharts={retornoSeries.some((s) => s.has) ? <CarteiraRetornoChart series={retornoSeries} carteira={carteira} mcMonths={data.months} composicao={composicao} /> : null} />
   );
 }
 
 // Carteira: MC R$ do mês (barras, eixo esquerdo) e retorno sobre estoque (linha, eixo
 // direito) = MC R$ ÷ estoque médio do mês. Os rótulos de cada eixo usam a cor da série.
 const RET_COLOR = "#2a78d6";
-function CarteiraRetornoChart({ series, carteira }) {
+function CarteiraRetornoChart({ series, carteira, mcMonths = [], composicao = null }) {
+  const monthsWithData = series.filter((s) => s.has);
+  const defaultMonth = ([...monthsWithData].reverse().find((s) => !s.provisional) || monthsWithData[monthsWithData.length - 1] || {}).key;
+  const [compMonth, setCompMonth] = useState(defaultMonth);
   const [wrapRef, width] = useElementWidth();
   const [hover, setHover] = useState(null);
   const W = Math.max(width, 280);
@@ -2956,6 +2978,64 @@ function CarteiraRetornoChart({ series, carteira }) {
         Retorno sobre estoque = MC R$ do mês ÷ estoque médio do mês (custo líquido, ponderado pelo tempo entre as importações do relatório).
         Considera só os fornecedores da carteira que existem no Vívora; meses sem leitura de estoque ficam sem retorno.
       </div>
+      {composicao && (() => {
+        const m = mcMonths.find((x) => x.key === compMonth);
+        const rows = composicao.entram.map((e) => {
+          const b = m && m.brands[e.key];
+          return { ...e, nome: b ? b.name : e.fornecedores.join(", "), fat: b ? b.fat : null, mc: b ? b.mc : null };
+        });
+        const comMc = rows.filter((r) => r.mc !== null).sort((a, b) => b.mc - a.mc);
+        const semMc = rows.filter((r) => r.mc === null).sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+        const totFat = comMc.reduce((acc, r) => acc + r.fat, 0), totMc = comMc.reduce((acc, r) => acc + r.mc, 0);
+        return (
+          <details className="vivo-comp-details">
+            <summary>Marcas que compõem a MC da carteira {carteira} ({comMc.length} com MC{semMc.length ? ` · ${semMc.length} sem MC` : ""}{composicao.fora.length ? ` · ${composicao.fora.length} fora da conta` : ""})</summary>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 8px", fontSize: 12 }}>
+              Mês:
+              <select className="vivo-select-tag" style={{ minWidth: 0 }} value={compMonth || ""} onChange={(e) => setCompMonth(e.target.value)}>
+                {[...monthsWithData].reverse().map((sm) => <option key={sm.key} value={sm.key}>{sm.fullLabel}{sm.provisional ? " (em andamento)" : ""}</option>)}
+              </select>
+            </div>
+            <div className="vivo-table-wrap">
+              <table className="vivo-table vivo-table-compact">
+                <thead><tr><th>Marca (planilha de MC)</th><th>Fornecedor no Vívora</th><th className="num">Faturamento</th><th className="num">MC R$</th><th className="num">MC %</th></tr></thead>
+                <tbody>
+                  {comMc.map((r) => (
+                    <tr key={r.key}>
+                      <td>{r.nome}</td>
+                      <td style={{ color: "var(--ink-soft)" }}>{r.fornecedores.join(", ")}</td>
+                      <td className="num mono">{fmtCurrency(r.fat)}</td>
+                      <td className={"num mono" + (r.mc < 0 ? " vivo-below-min" : "")}>{fmtCurrency(r.mc)}</td>
+                      <td className={"num mono" + (r.mc < 0 ? " vivo-below-min" : "")}>{fmtPct(r.fat ? r.mc / r.fat : null)}</td>
+                    </tr>
+                  ))}
+                  <tr className="vivo-order-sheet-total">
+                    <td>Total na conta</td><td></td>
+                    <td className="num mono">{fmtCurrency(totFat)}</td>
+                    <td className="num mono">{fmtCurrency(totMc)}</td>
+                    <td className="num mono">{fmtPct(totFat ? totMc / totFat : null)}</td>
+                  </tr>
+                  {semMc.map((r) => (
+                    <tr key={r.key} title="Não há MC com esse nome na aba Dados da planilha neste mês: sem venda, ou nome diferente — vincule a marca na seção de MC da tela do fornecedor">
+                      <td style={{ color: "var(--amber)" }}>sem MC na planilha</td>
+                      <td>{r.fornecedores.join(", ")}</td>
+                      <td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {composicao.fora.length > 0 && (
+              <div className="vivo-mc-note" style={{ marginTop: 10 }}>
+                <strong style={{ color: "var(--amber)" }}>Na aba Carteira, mas fora da conta:</strong>
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {composicao.fora.map((x) => <li key={x.name}>{x.name} — {x.motivo}</li>)}
+                </ul>
+              </div>
+            )}
+          </details>
+        );
+      })()}
     </div>
   );
 }
@@ -5652,6 +5732,8 @@ const VIVO_CSS = `
 .vivo-breakdown-track { height: 8px; background: var(--paper); border-radius: 4px; overflow: hidden; }
 .vivo-breakdown-track i { display: block; height: 100%; border-radius: 4px; }
 .vivo-breakdown-value { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--ink); text-align: right; min-width: 70px; }
+.vivo-comp-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.vivo-comp-details summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink); }
 .vivo-mc-channels { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .vivo-mc-ch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .vivo-mc-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
