@@ -2723,11 +2723,12 @@ function mcMonthLabel(key, withYear) {
   const [y, m] = key.split("-");
   return MC_MONTH_NAMES[Number(m) - 1] + (withYear ? "/" + y.slice(2) : "");
 }
-// Mês de referência da MC no Pedido Gerado:
-//   - até o dia MC_REF_DIA_SEGURO → mês retrasado (o anterior pode ainda não estar fechado)
-//   - depois disso → mês anterior; se a planilha dele ainda estiver vazia, volta ao retrasado
-// O status "em andamento" da planilha é só informativo (hoje não é atualizado com confiança).
-// Ajustar aqui quando o prazo de fechamento das planilhas for definido.
+// Mês de referência da MC (último mês FECHADO) — vale para todos os relatórios:
+//   - a partir do dia MC_REF_DIA_SEGURO → mês anterior (planilha considerada finalizada);
+//     se a planilha dele ainda estiver vazia, volta ao retrasado
+//   - antes disso → mês retrasado
+// O status "em andamento" da planilha é ignorado (não é atualizado com confiança): meses até
+// o de referência contam como fechados; os seguintes, como "em andamento".
 const MC_REF_DIA_SEGURO = 10;
 function mcMonthKeyBack(now, back) {
   const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
@@ -3117,6 +3118,21 @@ function brandExcessPct(products, fornecedor) {
 
 // Card "Marca em <mês>": faturamento, MC R$ e MC % da marca no mês de referência
 // (mesma regra de mês do Pedido Gerado — ver mcPickRefMonth).
+// Retorno sobre estoque da marca no último mês FECHADO com MC e estoque médio:
+// MC R$ do mês ÷ estoque médio do mês. prods = todos os SKUs da marca (inclusive inativos).
+function brandRetorno(data, brandKey, prods) {
+  if (!data) return null;
+  const stock = buildMonthlyAvgStock(prods);
+  const series = buildMcSeries(data, (m) => m.brands[brandKey]);
+  const refKey = mcPickRefMonth(data).key;
+  for (let i = series.length - 1; i >= 0; i--) {
+    const sm = series[i], st = stock[sm.key];
+    if (sm.key > refKey) continue;
+    if (sm.has && st && st.avg > 0) return { value: sm.mc / st.avg, label: sm.fullLabel, key: sm.key, mc: sm.mc, avg: st.avg };
+  }
+  return null;
+}
+
 // capitalExcPct (opcional): capital excedente % atual da marca, mostrado ao lado do MC %.
 // retornoProducts (opcional): produtos para calcular o retorno sobre estoque do último mês
 // FECHADO com MC e estoque médio (até o mês de referência do card).
@@ -3125,21 +3141,10 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoP
   const brandKey = (settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor);
   const retorno = useMemo(() => {
     if (!retornoProducts || !mc.data) return undefined;
-    const stock = buildMonthlyAvgStock(Object.values(retornoProducts).filter((p) => p.fornecedor === fornecedor));
-    const series = buildMcSeries(mc.data, (m) => m.brands[brandKey]);
-    const refKey = mcPickRefMonth(mc.data).key; // só meses fechados (o corrente ainda não tem MC)
-    for (let i = series.length - 1; i >= 0; i--) {
-      const sm = series[i], st = stock[sm.key];
-      if (sm.key > refKey) continue;
-      if (sm.has && st && st.avg > 0) return { value: sm.mc / st.avg, label: sm.fullLabel, provisional: sm.provisional };
-    }
-    return null;
+    return brandRetorno(mc.data, brandKey, Object.values(retornoProducts).filter((p) => p.fornecedor === fornecedor));
   }, [retornoProducts, mc.data, fornecedor, brandKey]);
   const mcRef = mcPickRefMonth(mc.data);
   const mcMonth = mcRef.month;
-  const mcCanaisAndamento = mcMonth && mcMonth.provisional
-    ? ((mcMonth.canaisEmAndamento || []).map((k) => (mc.data.channelLabels || {})[k] || k).join(", ") || "algum canal")
-    : null;
   const mcBrand = mcMonth ? mcMonth.brands[(settings && settings.mcBrandMap && settings.mcBrandMap[fornecedor]) || mcNorm(fornecedor)] : null;
   return (
     <div className="vivo-mc-order-box vivo-card" style={style}>
@@ -3178,9 +3183,6 @@ function McBrandMonthCard({ fornecedor, settings, style, capitalExcPct, retornoP
           <AlertTriangle size={13} /> {mcRef.nota}
         </div>
       )}
-      {mcCanaisAndamento && (
-        <div className="vivo-mc-note">Informativo: a planilha de {mcRef.label} ainda marca {mcCanaisAndamento} como “em andamento”.</div>
-      )}
     </div>
   );
 }
@@ -3189,9 +3191,9 @@ function mcPickRefMonth(data, now = new Date()) {
   const anterior = mcMonthKeyBack(now, 1), retrasado = mcMonthKeyBack(now, 2);
   const find = (k) => ((data && data.months) || []).find((m) => m.key === k) || null;
   let key = anterior, nota = null;
-  if (now.getDate() <= MC_REF_DIA_SEGURO) {
+  if (now.getDate() < MC_REF_DIA_SEGURO) {
     key = retrasado;
-    nota = `Até o dia ${MC_REF_DIA_SEGURO} usamos o mês retrasado, porque a MC de ${mcMonthLabel(anterior, true)} ainda pode não estar fechada.`;
+    nota = `Até o dia ${MC_REF_DIA_SEGURO - 1} usamos o mês retrasado; a planilha de MC de ${mcMonthLabel(anterior, true)} é considerada finalizada a partir do dia ${MC_REF_DIA_SEGURO}.`;
   } else if (data && !find(anterior)) {
     key = retrasado;
     nota = `A planilha de MC de ${mcMonthLabel(anterior, true)} ainda está vazia — mostrando ${mcMonthLabel(retrasado, true)}.`;
@@ -3388,6 +3390,7 @@ function buildMcSeries(data, pick) {
   if (!data || !data.months || !data.months.length) return [];
   const months = data.months.slice(-12);
   const multiYear = new Set(months.map((m) => m.key.slice(0, 4))).size > 1;
+  const refKey = mcPickRefMonth(data).key; // meses depois dele = em andamento
   return months.map((m) => {
     const r = pick(m);
     const fat = (r && r.fat) || 0;
@@ -3395,7 +3398,7 @@ function buildMcSeries(data, pick) {
     return {
       key: m.key, label: mcMonthLabel(m.key, multiYear), fullLabel: mcMonthLabel(m.key, true),
       fat, mc, un: (r && r.un) || 0, pct: fat ? mc / fat : null,
-      provisional: !!m.provisional, ch: (r && r.ch) || {}, has: !!r,
+      provisional: m.key > refKey, ch: (r && r.ch) || {}, has: !!r,
     };
   });
 }
@@ -4858,6 +4861,8 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
   const supplierTags = settings.supplierTags || {};
   const mcData = useMcData();
   const mcUnitOf = useMemo(() => buildMcUnitLookup(mcData.data, settings), [mcData.data, settings]);
+  const carteiraOf = useMemo(() => mcCarteiraLookup(mcData.data, settings), [mcData.data, settings]);
+  const [carteiraFilter, setCarteiraFilter] = useState("all"); // "all" | "A" | "B" | "none"
 
   const rows = useMemo(() => {
     const seen = new Set();
@@ -4873,9 +4878,12 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
       const pct = estoqueR > 0 ? (capitalExc / estoqueR) * 100 : 0;
       const tag = supplierTags[f] || "";
       const mcRisco = sumMcRisco(prods, mcUnitOf);
-      return { fornecedor: f, estoqueR, capitalExc, pct, tag, mcRisco, mcRiscoValue: mcRisco ? mcRisco.total : -1 };
+      const retorno = brandRetorno(mcData.data, settings?.mcBrandMap?.[f] || mcNorm(f), Object.values(products).filter((p) => p.fornecedor === f));
+      const carteira = carteiraOf ? carteiraOf(f) : null;
+      return { fornecedor: f, estoqueR, capitalExc, pct, tag, mcRisco, mcRiscoValue: mcRisco ? mcRisco.total : -1,
+        retorno, retornoValue: retorno ? retorno.value : -Infinity, carteira };
     });
-  }, [products, supplierTags, mcUnitOf]);
+  }, [products, supplierTags, mcUnitOf, mcData.data, settings, carteiraOf]);
 
   const filtered = useMemo(() => {
     let out = rows;
@@ -4885,6 +4893,8 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
       if (tagFilter === "") out = out.filter((r) => !r.tag);
       else out = out.filter((r) => r.tag === tagFilter);
     }
+    if (carteiraFilter === "A" || carteiraFilter === "B") out = out.filter((r) => r.carteira === carteiraFilter);
+    else if (carteiraFilter === "none") out = out.filter((r) => r.carteira !== "A" && r.carteira !== "B");
     return [...out].sort((a, b) => {
       const va = a[sortCol], vb = b[sortCol];
       if (sortCol === "fornecedor" || sortCol === "tag") {
@@ -4894,7 +4904,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
       }
       return sortDir === "desc" ? (vb || 0) - (va || 0) : (va || 0) - (vb || 0);
     });
-  }, [rows, tagFilter, sortCol, sortDir]);
+  }, [rows, tagFilter, sortCol, sortDir, carteiraFilter]);
 
   const totalEstoque  = filtered.reduce((acc, r) => acc + r.estoqueR, 0);
   const totalCapital  = filtered.reduce((acc, r) => acc + r.capitalExc, 0);
@@ -4919,6 +4929,13 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
           <button className={"vivo-supplier-tag-chip vivo-stag-liquidacao" + (tagFilter === "liquidacao" ? " is-active" : "")} onClick={() => setTagFilter(tagFilter === "liquidacao" ? "all" : "liquidacao")}>Liquidação</button>
           <button className={"vivo-supplier-tag-chip vivo-stag-inativo" + (tagFilter === "inativo" ? " is-active" : "")} onClick={() => setTagFilter(tagFilter === "inativo" ? "all" : "inativo")}>Inativo</button>
         </div>
+        <div className="vivo-supplier-tag-chips">
+          <span className="vivo-supplier-tag-label">Carteira:</span>
+          {[["all", "Todas"], ["A", "Carteira A"], ["B", "Carteira B"], ["none", "Sem carteira"]].map(([v, label]) => (
+            <button key={v} className={"vivo-supplier-tag-chip" + (carteiraFilter === v ? " is-active-neutral" : "")} onClick={() => setCarteiraFilter(v)} disabled={v !== "all" && !carteiraOf}
+              title={v === "none" ? "Marcas que não estão na aba Carteira da planilha de MC nem vinculadas no app" : undefined}>{label}</button>
+          ))}
+        </div>
       </div>
 
       <div className="vivo-table-wrap vivo-card">
@@ -4930,6 +4947,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
               <th className="num">Capital Exc. R$ <SortBtn col="capitalExc" /></th>
               <th className="num">% Cap. Exc. <SortBtn col="pct" /></th>
               <th className="num" title={MC_RISCO_TH_TITLE}>MC em risco <SortBtn col="mcRiscoValue" /></th>
+              <th className="num" title="MC R$ do último mês fechado ÷ estoque médio da marca no mês (custo líquido)">Retorno s/ estoque <SortBtn col="retornoValue" /></th>
               <th>Tag <SortBtn col="tag" /></th>
             </tr>
           </thead>
@@ -4943,6 +4961,11 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
                   {r.pct.toFixed(1)}%
                 </td>
                 <McRiscoSumCell info={r.mcRisco} loading={mcData.loading} />
+                <td className={"num mono" + (r.retorno && r.retorno.value < 0 ? " vivo-below-min" : "")}
+                  title={r.retorno ? `${r.retorno.label}: MC ${fmtCurrency(r.retorno.mc)} ÷ estoque médio ${fmtCurrency(r.retorno.avg)}` : "Sem MC ou sem leitura de estoque no último mês fechado"}
+                  style={!r.retorno ? { color: "#bbb" } : undefined}>
+                  {mcData.loading && !mcData.data ? "…" : r.retorno ? fmtPct(r.retorno.value) : "—"}
+                </td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
                     className="vivo-select-tag"
@@ -4968,6 +4991,7 @@ function BrandsTab({ products, settings, persistSettings, onSelectSupplier }) {
                 const total = list.reduce((acc, r) => acc + r.mcRisco.total, 0);
                 return <McRiscoSumCell info={list.length ? { total, count: list.reduce((acc, r) => acc + r.mcRisco.count, 0), estimado: list.some((r) => r.mcRisco.estimado) } : null} loading={mcData.loading} />;
               })()}
+              <td></td>
               <td></td>
             </tr>
           </tbody>
