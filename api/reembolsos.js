@@ -10,6 +10,7 @@
 //   - demais status ("aguardando", "divergência") = pendente
 
 const { allowOrigin, sendJson } = require("./_google");
+const { requireUser } = require("./_auth");
 
 const LIST_ID = "901325395468";
 const FIELDS = {
@@ -103,6 +104,7 @@ async function fetchAllTasks(token) {
 
 async function handler(req, res) {
   if (!allowOrigin(req, res)) return;
+  if (!(await requireUser(req, res))) return;
   try {
     const token = process.env.CLICKUP_TOKEN;
     if (!token) throw new Error("Variável CLICKUP_TOKEN não configurada no Vercel.");

@@ -8,6 +8,7 @@
 // A planilha precisa estar compartilhada (leitor) com o e-mail da conta de serviço.
 
 const { getAccessToken, gget, allowOrigin, sendJson } = require("./_google");
+const { requireUser } = require("./_auth");
 
 const DEFAULT_SHEET_ID = "1zAh_1cNKSEUdTtbGijETG3EQNAqPCxLZT3vJkN7JI8Q";
 const DEFAULT_TAB = "Tabela Regime Normal - Natueu";
@@ -65,6 +66,7 @@ function parseProdutos(values) {
 
 async function handler(req, res) {
   if (!allowOrigin(req, res)) return;
+  if (!(await requireUser(req, res))) return;
   try {
     const token = await getAccessToken();
     const id = process.env.PRODUTOS_SHEET_ID || DEFAULT_SHEET_ID;

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import {
@@ -428,42 +429,64 @@ const SUPABASE_URL  = "https://rartvdhsnvrnsczuleqq.supabase.co";
 const SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJhcnR2ZGhzbnZybnNjenVsZXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxNDg5ODgsImV4cCI6MjEwMjcyNDk4OH0.BCAxD7WHwk_NbbwhFZVJ3RgVS_Zr8O7UBH3oT6aWD4E";
 const SUPABASE_TABLE = "vivo_storage";
 
-const SB_HEADERS = {
-  "Content-Type": "application/json",
-  "apikey": SUPABASE_KEY,
-  "Authorization": `Bearer ${SUPABASE_KEY}`,
-  "Prefer": "resolution=merge-duplicates",
-};
+// Login pelo Supabase Auth. A chave acima é pública: quem protege os dados é o RLS, que só
+// libera vivo_storage para usuários logados e presentes em vivo_usuarios.
+const supabase = IS_CLAUDE_ARTIFACT ? null : createClient(SUPABASE_URL, SUPABASE_KEY);
 
+async function sessionToken() {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session && data.session.access_token;
+  if (!token) throw new Error("Sessão expirada. Entre novamente.");
+  return token;
+}
+
+async function sbHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "apikey": SUPABASE_KEY,
+    "Authorization": `Bearer ${await sessionToken()}`,
+    "Prefer": "resolution=merge-duplicates",
+  };
+}
+
+// Chamada às funções /api/* com o token da sessão
+async function apiFetch(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (supabase) headers.Authorization = `Bearer ${await sessionToken()}`;
+  return fetch(url, { ...opts, headers });
+}
+
+// O usuário logado está na lista de autorizados? (o RLS só devolve a própria linha)
+async function sbIsAuthorized() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/vivo_usuarios?select=user_id&limit=1`, { headers: await sbHeaders() });
+  if (!res.ok) throw new Error(`Erro ${res.status} ao verificar o acesso`);
+  const rows = await res.json();
+  return rows.length > 0;
+}
+
+// Falha de leitura precisa virar erro: tratar como "sem dados" abriria o app vazio, e a
+// próxima gravação apagaria os dados reais.
 async function sbGet(key, fallback) {
-  try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?key=eq.${encodeURIComponent(key)}&select=value`,
-      { headers: SB_HEADERS }
-    );
-    if (!res.ok) return fallback;
-    const rows = await res.json();
-    if (!rows || rows.length === 0) return fallback;
-    return JSON.parse(rows[0].value);
-  } catch (e) {
-    console.error("sbGet error", key, e);
-    return fallback;
-  }
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?key=eq.${encodeURIComponent(key)}&select=value`,
+    { headers: await sbHeaders() }
+  );
+  if (!res.ok) throw new Error(`Erro ${res.status} ao ler ${key}`);
+  const rows = await res.json();
+  if (!rows || rows.length === 0) return fallback;
+  return JSON.parse(rows[0].value);
 }
 
 async function sbSet(key, value) {
-  try {
-    await fetch(
-      `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`,
-      {
-        method: "POST",
-        headers: SB_HEADERS,
-        body: JSON.stringify({ key, value: JSON.stringify(value) }),
-      }
-    );
-  } catch (e) {
-    console.error("sbSet error", key, e);
-  }
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`,
+    {
+      method: "POST",
+      headers: await sbHeaders(),
+      body: JSON.stringify({ key, value: JSON.stringify(value) }),
+    }
+  );
+  if (!res.ok) throw new Error(`Erro ${res.status} ao gravar ${key}`);
 }
 
 function withTimeout(promise, ms, fallback) {
@@ -506,6 +529,7 @@ async function storageSetRaw(key, value) {
 // uma mais nova) e coalesce edições rápidas em sequência — só o valor mais recente
 // é enviado quando a gravação anterior termina.
 const _writeQueue = {}; // key -> { running: Promise|null, pending: value|undefined }
+let _onSaveResult = null; // avisa o App se a última gravação funcionou (mensagem de erro ou null)
 async function storageSet(key, value) {
   const q = _writeQueue[key] || (_writeQueue[key] = { running: null, pending: undefined });
   if (q.running) {
@@ -515,8 +539,8 @@ async function storageSet(key, value) {
   q.running = (async () => {
     let current = value;
     while (true) {
-      try { await storageSetRaw(key, current); }
-      catch (e) { console.error("storageSet error", key, e); }
+      try { await storageSetRaw(key, current); if (_onSaveResult) _onSaveResult(null); }
+      catch (e) { console.error("storageSet error", key, e); if (_onSaveResult) _onSaveResult(String(e.message || e)); }
       if (q.pending === undefined) break;
       current = q.pending;
       q.pending = undefined;
@@ -554,6 +578,57 @@ function MigrationBanner({ migration, onMigrate }) {
   );
 }
 
+function AuthShell({ children }) {
+  return (
+    <div className="vivo-root vivo-auth">
+      <style>{VIVO_CSS}</style>
+      <div className="vivo-auth-card vivo-card">
+        <div className="vivo-auth-brand">Vívora</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    const { error: err } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (err) {
+      setError(err.status === 400 ? "E-mail ou senha incorretos." : "Não foi possível entrar. Tente de novo.");
+      setBusy(false);
+    }
+  }
+  return (
+    <AuthShell>
+      <form onSubmit={submit} className="vivo-auth-form">
+        <label>E-mail<input type="email" autoComplete="username" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+        <label>Senha<input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        {error && <div className="vivo-auth-error">{error}</div>}
+        <button className="vivo-btn vivo-btn-primary" type="submit" disabled={busy}>{busy ? "Entrando…" : "Entrar"}</button>
+      </form>
+    </AuthShell>
+  );
+}
+
+function AuthMessage({ text, onRetry, onLogout }) {
+  return (
+    <AuthShell>
+      <p className="vivo-auth-text">{text}</p>
+      <div style={{ display: "flex", gap: 8 }}>
+        {onRetry && <button className="vivo-btn vivo-btn-primary" onClick={onRetry}>Tentar de novo</button>}
+        {onLogout && <button className="vivo-btn vivo-btn-ghost" onClick={onLogout}>Sair</button>}
+      </div>
+    </AuthShell>
+  );
+}
+
 export default function App() {
   const [products, setProducts] = useState({});
   const [history, setHistory] = useState([]);
@@ -564,7 +639,15 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [mainTab, setMainTab] = useState("compras");
   const [subTab, setSubTab]   = useState("overview");
-  const [authed, setAuthed] = useState(true);
+  // Sessão: undefined = verificando, null = sem login. Acesso: checking | out | denied | error | in
+  const [sessionUser, setSessionUser] = useState(undefined);
+  const [access, setAccess] = useState(supabase ? "checking" : "in");
+  const [accessAttempt, setAccessAttempt] = useState(0);
+  const [loadError, setLoadError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [saveError, setSaveError] = useState(null);
+  const authed = access === "in";
+  const userId = sessionUser ? sessionUser.id : sessionUser;
   const [migration, setMigration] = useState({ checked: false, available: false, running: false, done: false, error: null });
 
   function goTo(mainId, subId, opts = {}) {
@@ -575,21 +658,58 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!supabase) return undefined;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSessionUser(session ? session.user : null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || userId === undefined) return undefined;
+    if (userId === null) {
+      // Saiu: nada do usuário anterior fica na memória
+      _mcPromise = null;
+      setProducts({}); setHistory([]); setOrders([]); setGeneratedOrder(null);
+      setSettings({ defaultCoverageDays: 30, supplierCoverageDays: {} });
+      setLoaded(false); setLoadError(null); setSaveError(null);
+      setAccess("out");
+      return undefined;
+    }
+    let cancelled = false;
+    setAccess("checking");
+    sbIsAuthorized()
+      .then((ok) => { if (!cancelled) setAccess(ok ? "in" : "denied"); })
+      .catch((e) => { console.error("sbIsAuthorized", e); if (!cancelled) setAccess("error"); });
+    return () => { cancelled = true; };
+  }, [userId, accessAttempt]);
+
+  useEffect(() => {
+    _onSaveResult = setSaveError;
+    return () => { _onSaveResult = null; };
+  }, []);
+
+  const logout = useCallback(() => { supabase.auth.signOut(); }, []);
+
+  useEffect(() => {
     if (!authed) return;
     let cancelled = false;
     (async () => {
-      const safetyTimer = setTimeout(() => {
-        if (!cancelled) setLoaded(true);
-      }, 10000);
-
-      const [p, h, s, o] = await Promise.all([
-        storageGet(K_PRODUCTS, {}),
-        storageGet(K_HISTORY, []),
-        storageGet(K_SETTINGS, { defaultCoverageDays: 30, supplierCoverageDays: {} }),
-        storageGet(K_ORDERS, []),
-      ]);
+      setLoadError(null);
+      let p, h, s, o;
+      try {
+        [p, h, s, o] = await Promise.all([
+          storageGet(K_PRODUCTS, {}),
+          storageGet(K_HISTORY, []),
+          storageGet(K_SETTINGS, { defaultCoverageDays: 30, supplierCoverageDays: {} }),
+          storageGet(K_ORDERS, []),
+        ]);
+      } catch (e) {
+        console.error("Falha ao carregar os dados", e);
+        if (!cancelled) setLoadError(String(e.message || e));
+        return;
+      }
       if (cancelled) return;
-      clearTimeout(safetyTimer);
 
       let needsMigration = false;
       const migratedProducts = { ...p };
@@ -621,7 +741,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authed]);
+  }, [authed, loadAttempt]);
 
   async function runMigration() {
     setMigration((m) => ({ ...m, running: true, error: null }));
@@ -681,6 +801,11 @@ export default function App() {
     await persistProducts({ ...hiddenRef.current, ...next });
   }, [persistProducts]);
 
+  if (access === "out") return <LoginScreen />;
+  if (access === "denied") return <AuthMessage text="Seu usuário não tem acesso ao Vívora. Fale com o administrador." onLogout={logout} />;
+  if (access === "error") return <AuthMessage text="Não foi possível verificar seu acesso." onRetry={() => setAccessAttempt((n) => n + 1)} onLogout={logout} />;
+  if (loadError) return <AuthMessage text={`Não foi possível carregar os dados (${loadError}). Nada foi alterado.`} onRetry={() => setLoadAttempt((n) => n + 1)} onLogout={supabase ? logout : null} />;
+
   if (!loaded) {
     return (
       <div className="vivo-root vivo-loading">
@@ -697,11 +822,20 @@ export default function App() {
       {migration.available && (
         <MigrationBanner migration={migration} onMigrate={runMigration} />
       )}
+      {saveError && (
+        <div className="vivo-save-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>A última alteração não foi salva ({saveError}). Recarregue a página antes de continuar.</span>
+          <button className="vivo-btn vivo-btn-primary" onClick={() => window.location.reload()}>Recarregar</button>
+        </div>
+      )}
       <TopNav
         mainTab={mainTab}
         subTab={subTab}
         goTo={goTo}
         monitoredCount={Object.values(viewProducts).filter((p) => p.monitoringActive).length}
+        userEmail={sessionUser ? sessionUser.email : null}
+        onLogout={supabase ? logout : null}
       />
       <main className="vivo-main">
         {mainTab === "relatorios" && subTab === "import" && (
@@ -832,7 +966,7 @@ const NAV_STRUCTURE = [
   },
 ];
 
-function TopNav({ mainTab, subTab, goTo, monitoredCount }) {
+function TopNav({ mainTab, subTab, goTo, monitoredCount, userEmail, onLogout }) {
   const countFor = (subId) => {
     if (subId === "monitorados") return monitoredCount;
     return null;
@@ -887,7 +1021,11 @@ function TopNav({ mainTab, subTab, goTo, monitoredCount }) {
         ))}
       </nav>
 
-      <div className="vivo-sidebar-footer">v{APP_VERSION}</div>
+      <div className="vivo-sidebar-footer">
+        {userEmail && <div className="vivo-sidebar-user" title={userEmail}>{userEmail}</div>}
+        {onLogout && <button className="vivo-sidebar-logout" onClick={onLogout}>Sair</button>}
+        <div>v{APP_VERSION}</div>
+      </div>
     </aside>
   );
 }
@@ -906,7 +1044,7 @@ function PriceTableTab({ products, persistProducts, settings, persistSettings })
     setStatus(null);
     setError(null);
     try {
-      const r = await fetch("/api/produtos", { cache: "no-store" });
+      const r = await apiFetch("/api/produtos", { cache: "no-store" });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || `Erro ${r.status}`);
       const next = { ...products };
@@ -2435,7 +2573,7 @@ function useApiData(url) {
   const [state, setState] = useState({ loading: true, data: null, error: null });
   const load = useCallback((force) => {
     setState((st) => ({ ...st, loading: true, error: null }));
-    fetch(url, force ? { cache: "no-store" } : undefined)
+    apiFetch(url, force ? { cache: "no-store" } : undefined)
       .then(async (r) => {
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error || `Erro ${r.status}`);
@@ -3212,7 +3350,7 @@ function fmtCompactBRL(n) {
 let _mcPromise = null;
 function fetchMcData(force) {
   if (!_mcPromise || force) {
-    _mcPromise = fetch("/api/mc", force ? { cache: "no-store" } : undefined).then(async (r) => {
+    _mcPromise = apiFetch("/api/mc", force ? { cache: "no-store" } : undefined).then(async (r) => {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || `Erro ${r.status} ao buscar a MC`);
       return j;
@@ -5584,6 +5722,17 @@ const VIVO_CSS = `
 .vivo-sidebar-sub-btn:hover { color: #e9e3d6; background: #2a2720; }
 .vivo-sidebar-sub-btn.is-nested { padding-left: 50px; font-size: 12px; }
 .vivo-sidebar-sub-btn.is-active { color: #fff; border-left-color: var(--amber); background: #2a2720; }
+.vivo-auth { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+.vivo-auth-card { width: 100%; max-width: 340px; padding: 24px; box-sizing: border-box; }
+.vivo-auth-brand { font-size: 22px; font-weight: 700; color: var(--ink); margin-bottom: 16px; }
+.vivo-auth-form { display: flex; flex-direction: column; gap: 12px; }
+.vivo-auth-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
+.vivo-auth-form input { border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font-size: 14px; font-family: inherit; color: var(--ink); background: var(--card); }
+.vivo-auth-error { font-size: 12px; color: var(--rust); }
+.vivo-auth-text { font-size: 13px; color: var(--ink); margin: 0 0 14px; line-height: 1.45; }
+.vivo-save-error { position: sticky; top: 0; z-index: 60; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; background: var(--rust-soft); color: var(--rust); font-size: 13px; }
+.vivo-sidebar-user { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px; }
+.vivo-sidebar-logout { background: none; border: 0; padding: 0; margin-bottom: 6px; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; display: block; }
 .vivo-sidebar-footer {
   padding: 12px 16px; font-size: 11px; color: #4a4540;
   border-top: 1px solid var(--sidebar-line);

@@ -11,6 +11,7 @@
 // As colunas são localizadas pelo NOME do cabeçalho (a posição muda entre os meses).
 
 const { getAccessToken, gget, allowOrigin, sendJson } = require("./_google");
+const { requireUser } = require("./_auth");
 
 const DEFAULT_FOLDER_ID = "1zOwKTPabTqqIIE6_Wu18cGD1hP2UCpPC";
 
@@ -230,6 +231,7 @@ async function readCarteira(files, token) {
 
 async function handler(req, res) {
   if (!allowOrigin(req, res)) return;
+  if (!(await requireUser(req, res))) return;
 
   try {
     const token = await getAccessToken();

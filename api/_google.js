@@ -61,6 +61,7 @@ function sendJson(res, status, body, cacheControl) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (cacheControl) res.setHeader("Cache-Control", cacheControl);
+  res.setHeader("Vary", "Authorization");
   res.end(JSON.stringify(body));
 }
 
