@@ -5149,6 +5149,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
   const [maxC30, setMaxC30] = useState("");
   const [scrollWidth, setScrollWidth] = useState(0);
   const [selectedSupplier, setSelectedSupplier] = useState(initialSupplier || null);
+  const [selected, setSelected] = useState({});
   const topScrollRef = React.useRef(null);
   const tableWrapRef = React.useRef(null);
 
@@ -5237,6 +5238,31 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
     });
   }, [rows, tagFilter, minEstoque, maxEstoque, minC30, maxC30, sortCol, sortDir]);
 
+  // Seleção em lote: só conta o que está visível com os filtros atuais
+  const selectedList = filtered.filter((r) => selected[r.fornecedor]);
+  const allVisibleSelected = filtered.length > 0 && selectedList.length === filtered.length;
+  function toggleSelect(f) { setSelected((cur) => ({ ...cur, [f]: !cur[f] })); }
+  function toggleSelectAll() { setSelected(allVisibleSelected ? {} : Object.fromEntries(filtered.map((r) => [r.fornecedor, true]))); }
+
+  // Etiqueta "Inativo" nas marcas e inativa os SKUs delas no cadastro
+  async function inactivateSelected() {
+    const marcas = selectedList.map((r) => r.fornecedor);
+    if (!marcas.length) return;
+    const set = new Set(marcas);
+    const prods = Object.values(products).filter((p) => !p.inactive && set.has(p.fornecedor));
+    const unidades = prods.reduce((acc, p) => acc + (p.estoque || 0), 0);
+    const aviso = unidades > 0 ? `\n\nAtenção: essas marcas ainda têm ${fmtNumber(unidades)} un. em estoque.` : "";
+    if (!window.confirm(`Inativar ${marcas.length} marca(s) e ${prods.length} SKU(s)?\n\nElas saem das telas de análise e de Compras. Os SKUs podem ser reativados em Relatórios → Limpeza de itens.${aviso}`)) return;
+    const now = Date.now();
+    const nextProducts = { ...products };
+    for (const p of prods) nextProducts[p.codigo] = { ...p, inactive: true, inactivatedAt: now };
+    const nextTags = { ...supplierTags };
+    for (const f of marcas) nextTags[f] = "inativo";
+    await persistProducts(nextProducts);
+    await persistSettings({ ...settings, supplierTags: nextTags });
+    setSelected({});
+  }
+
   if (suppliers.length === 0) return <div className="vivo-page"><EmptyState icon={Package} title="Nenhum fornecedor" text="Importe relatórios para que os fornecedores apareçam aqui." /></div>;
 
   if (selectedSupplier) {
@@ -5274,12 +5300,20 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
         <button className="vivo-btn vivo-btn-ghost" onClick={() => { setTagFilter("all"); setMinEstoque(""); setMaxEstoque(""); setMinC30(""); setMaxC30(""); }}>Limpar filtros</button>
       </div>
 
+      <div className="vivo-action-row">
+        <span className="vivo-action-summary">{selectedList.length} marca(s) selecionada(s)</span>
+        {selectedList.length > 0 && <button className="vivo-btn vivo-btn-ghost" onClick={() => setSelected({})}>Limpar seleção</button>}
+        <div className="vivo-action-spacer" />
+        <button className="vivo-btn vivo-btn-danger" onClick={inactivateSelected} disabled={selectedList.length === 0}>Inativar marcas e SKUs</button>
+      </div>
+
       <div className="vivo-top-scrollbar" ref={topScrollRef} onScroll={syncFromTop}><div style={{ width: scrollWidth, height: 1 }} /></div>
 
       <div className="vivo-table-wrap vivo-table-wrap-sticky vivo-card" ref={tableWrapRef} onScroll={syncFromTable}>
         <table className="vivo-table vivo-table-suppliers">
           <thead>
             <tr>
+              <th style={{ width: 32 }}><input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAll} title="Selecionar todas as marcas visíveis" /></th>
               <th onClick={() => toggleSort("fornecedor")} className="vivo-th-sortable" style={{ width: 140, minWidth: 140 }}>Fornecedor <SortIcon col="fornecedor" /></th>
               <th onClick={() => toggleSort("tag")} className="vivo-th-sortable">Tag <SortIcon col="tag" /></th>
               <th className="num vivo-th-custom" style={{ width: 80 }}>Cobertura</th>
@@ -5296,7 +5330,8 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
           </thead>
           <tbody>
             {filtered.map((r, i) => (
-              <tr key={r.fornecedor} className={i % 2 === 0 ? "vivo-row-even" : "vivo-row-odd"}>
+              <tr key={r.fornecedor} className={(i % 2 === 0 ? "vivo-row-even" : "vivo-row-odd") + (selected[r.fornecedor] ? " is-selected" : "")}>
+                <td><input type="checkbox" checked={!!selected[r.fornecedor]} onChange={() => toggleSelect(r.fornecedor)} /></td>
                 <td className="vivo-supplier-name vivo-supplier-name-link" style={{ width: 140, minWidth: 140, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} onClick={() => setSelectedSupplier(r.fornecedor)} title={r.fornecedor}>{r.fornecedor}</td>
                 <td>
                   {r.tag
@@ -5326,7 +5361,7 @@ function SuppliersTab({ products, settings, persistSettings, persistProducts, on
                 <td className={"num mono" + (r.minOrder && r.c90 < r.minOrder ? " vivo-below-min" : r.minOrder && r.c90 >= r.minOrder ? " vivo-above-min" : "")}>{fmtCurrency(r.c90)}</td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={12} className="vivo-table-empty">Nenhum fornecedor encontrado.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={13} className="vivo-table-empty">Nenhum fornecedor encontrado.</td></tr>}
           </tbody>
         </table>
       </div>
