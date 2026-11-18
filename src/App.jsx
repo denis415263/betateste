@@ -2216,6 +2216,24 @@ function calcSupplierPurchase(products, fornecedor, days) {
     }, 0);
 }
 
+// Cor do MC %: ≤0% vermelho forte, 5% laranja, 10% verde-claro, ≥15% verde. Interpola entre os pontos.
+function mcPctColor(pct) {
+  if (pct === null || pct === undefined || !isFinite(pct)) return null;
+  const v = pct * 100;
+  const stops = [[0, 0], [5, 28], [10, 85], [15, 130]];
+  let hue;
+  if (v <= stops[0][0]) hue = 0;
+  else if (v >= stops[stops.length - 1][0]) hue = 130;
+  else {
+    for (let i = 1; i < stops.length; i++) {
+      const [x0, h0] = stops[i - 1], [x1, h1] = stops[i];
+      if (v <= x1) { hue = h0 + (h1 - h0) * (v - x0) / (x1 - x0); break; }
+    }
+  }
+  const forte = v <= 0;
+  return { background: `hsl(${hue.toFixed(0)}, ${forte ? 78 : 65}%, ${forte ? 84 : 88}%)`, color: `hsl(${hue.toFixed(0)}, 70%, ${forte ? 30 : 26}%)`, fontWeight: 600 };
+}
+
 function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts }) {
   const defaultDays = generatedOrder?.days || 30;
   const [skuDays, setSkuDays]   = useState({});
@@ -2306,18 +2324,17 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
           <thead>
             <tr>
               <th>Item</th>
-              <th style={{ width: 80 }}>Tag</th>
-              <th style={{ width: 110, minWidth: 110, maxWidth: 110 }}>Fornecedor</th>
+              <th style={{ width: 70 }}>Tag</th>
+              <th className="num" style={{ width: 58 }} title={`MC % do item em ${mcRef.label}. Vermelho: abaixo de 5% (0% ou menos, muito ruim). Verde: acima de 10% (15% ou mais, muito bom).`}>MC %</th>
               <th className="mono">SKU</th>
-              <th className="num">Cx Master</th>
-              <th className="num">Estoque</th>
-              <th className="num">Vendas 30D</th>
-              <th className="num">Cobertura (dias)</th>
-              <th className="num">Qtd. Necessária</th>
-              <th className="num">Custo Nota</th>
-              <th className="num">Valor Compra</th>
-              <th className="num" title={`MC total do item em ${mcRef.label}, somando todos os canais (planilha de MC)`}>MC R$ {mcRef.label}</th>
-              <th className="num" title={`MC % do item em ${mcRef.label}`}>MC %</th>
+              <th className="num" style={{ width: 56 }}>Cx<br />Master</th>
+              <th className="num" style={{ width: 56 }}>Estoque</th>
+              <th className="num" style={{ width: 56 }}>Vendas<br />30D</th>
+              <th className="num" style={{ width: 56 }}>Cob.<br />(dias)</th>
+              <th className="num" style={{ width: 60 }}>Qtd.<br />Nec.</th>
+              <th className="num">Custo<br />Nota</th>
+              <th className="num">Valor<br />Compra</th>
+              <th className="num" title={`MC total do item em ${mcRef.label}, somando todos os canais (planilha de MC)`}>MC R$<br />{mcRef.label}</th>
             </tr>
           </thead>
           <tbody>
@@ -2329,8 +2346,14 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
                 onClick={() => setDrawerProduct(drawerProduct?.codigo === p.codigo ? null : p)}
               >
                 <ItemCell name={p.item} />
-                <td style={{ width: 80 }} onClick={(e) => e.stopPropagation()}><ItemTagBadge tag={p.itemTag} /></td>
-                <td className="vivo-td-supplier" title={p.fornecedor}>{p.fornecedor}</td>
+                <td style={{ width: 70 }} onClick={(e) => e.stopPropagation()}><ItemTagBadge tag={p.itemTag} /></td>
+                {(() => {
+                  const mi = mcItem(p.codigo);
+                  const pct = mi && mi.fat ? mi.mc / mi.fat : null;
+                  const cor = mcPctColor(pct);
+                  if (!cor) return <td className="num mono" style={{ color: "#bbb" }}>—</td>;
+                  return <td className="num mono"><span style={{ ...cor, display: "inline-block", minWidth: 44, padding: "1px 6px", borderRadius: 5, textAlign: "right" }}>{fmtPct(pct)}</span></td>;
+                })()}
                 <td className="mono">{p.codigo}</td>
                 <td className="num" onClick={(e) => e.stopPropagation()}>
                   <input
@@ -2339,13 +2362,13 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
                     placeholder="—"
                     value={p.cxMaster || ""}
                     onChange={(e) => saveCxMaster(p.codigo, e.target.value)}
-                    style={{ width: 54 }}
+                    style={{ width: 46, padding: "4px 5px" }}
                   />
                 </td>
                 <td className="num mono">{fmtNumber(p.estoque || 0)}</td>
                 <td className="num mono">{p.vendas30 ?? "—"}</td>
                 <td className="num" onClick={(e) => e.stopPropagation()}>
-                  <input type="number" min="1" className={"vivo-input-mini" + (skuDays[p.codigo] !== undefined ? " vivo-sku-days-custom" : "")} value={p.days} onChange={(e) => setDaysForSku(p.codigo, e.target.value)} />
+                  <input type="number" min="1" className={"vivo-input-mini" + (skuDays[p.codigo] !== undefined ? " vivo-sku-days-custom" : "")} value={p.days} onChange={(e) => setDaysForSku(p.codigo, e.target.value)} style={{ width: 46, padding: "4px 5px" }} />
                 </td>
                 <td className="num mono">
                   {p.needed > 0
@@ -2356,12 +2379,8 @@ function GeneratedOrderTab({ generatedOrder, products, settings, persistProducts
                 <td className={"num mono" + (p.valorCompra > 0 ? " vivo-value-positive" : "")}>{fmtCurrency(p.valorCompra)}</td>
                 {(() => {
                   const mi = mcItem(p.codigo);
-                  if (!mi) return (<><td className="num mono" style={{ color: "#bbb" }}>—</td><td className="num mono" style={{ color: "#bbb" }}>—</td></>);
-                  const neg = mi.mc < 0;
-                  return (<>
-                    <td className={"num mono" + (neg ? " vivo-below-min" : "")}>{fmtCurrency(mi.mc)}</td>
-                    <td className={"num mono" + (neg ? " vivo-below-min" : "")}>{fmtPct(mi.fat ? mi.mc / mi.fat : null)}</td>
-                  </>);
+                  if (!mi) return <td className="num mono" style={{ color: "#bbb" }}>—</td>;
+                  return <td className={"num mono" + (mi.mc < 0 ? " vivo-below-min" : "")}>{fmtCurrency(mi.mc)}</td>;
                 })()}
               </tr>
             ))}
